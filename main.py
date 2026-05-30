@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 
+# Настройка логирования в консоль Render
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -33,7 +34,6 @@ def read_root():
 
 if not SESSION_STRING:
     logger.error("❌ КРИТИЧЕСКАЯ ОШИБКА: Переменная TELEGRAM_SESSION не найдена в настройках Render!")
-    # Создаем пустую заглушку, чтобы uvicorn выдал ошибку в логи, а не просто молча падал
     client = None
 else:
     # Запускаем чистую сессию прямо из строки текста в памяти
