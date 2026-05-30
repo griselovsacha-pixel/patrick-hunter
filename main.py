@@ -2,10 +2,16 @@ import re
 import random
 import asyncio
 import logging
+import sys
 from fastapi import FastAPI
 from telethon import TelegramClient, events
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Максимально подробное логирование в консоль
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
 logger = logging.getLogger(__name__)
 
 API_ID = 31206776          
@@ -20,13 +26,9 @@ app = FastAPI()
 
 @app.get("/")
 def read_root():
-    return {
-        "status": "active",
-        "bot_worker": "running",
-        "security_level": "maximum"
-    }
+    return {"status": "active", "bot_worker": "running"}
 
-# Чистое имя сессии без пробелов и скобок
+# Используем строгое имя сессии
 client = TelegramClient('patrick_hunter_session', API_ID, API_HASH)
 
 @client.on(events.NewMessage(chats=CHANNEL_SOURCE))
@@ -34,7 +36,6 @@ async def handle_new_promo_post(event):
     text = event.raw_text
     if not text:
         return
-        
     text_lower = text.lower()
     
     if any(trigger in text_lower for trigger in ["активаций", "промокод", "дейли", "промо"]):
@@ -45,9 +46,7 @@ async def handle_new_promo_post(event):
             promo_code = match.group(1).strip()
             logger.info(f"🚀 Перехвачен новый промокод: {promo_code}")
             
-            report = f"🔔 **ПЕРЕХВАТ ПРОМОКОДА** 🔔\n\n"
-            report += f"🔑 Найденный код: `{promo_code}`\n"
-            report += f"🛡️ Имитирую действия человека...\n\n"
+            report = f"🔔 **ПЕРЕХВАТ ПРОМОКОДА** 🔔\n\n🔑 Код: `{promo_code}`\n🛡️ Имитирую действия человека...\n\n"
             
             try:
                 logger.info("Будим бота командой /start...")
@@ -89,7 +88,7 @@ async def handle_new_promo_post(event):
                 
                 await asyncio.sleep(random.uniform(1.8, 2.3))
                 
-                logger.info(f"Отправляем секретный код: {promo_code}")
+                logger.info(f"Отправляем код: {promo_code}")
                 await client.send_message(TARGET_BOT, promo_code)
                 report += f"🚀 Код `{promo_code}` отправлен на активацию!\n"
                 
@@ -98,21 +97,19 @@ async def handle_new_promo_post(event):
                     report += f"\n💬 **Результат от бота:**\n_{message.text}_"
                 
             except Exception as e:
-                logger.error(f"Ошибка в цепочке автоматизации: {e}")
+                logger.error(f"Ошибка автоматизации: {e}")
                 report += f"❌ **Сбой:** {str(e)}"
             
             await client.send_message('me', report)
-            logger.info("Отчет успешно отправлен в ЛС владельцу.")
 
-@app.on_event("startup")
-async def startup_event():
-    # На всякий случай оборачиваем в try, чтобы FastAPI не падал при коннекте
-    try:
-        await client.start()
-        logger.info("🤖 Юзербот успешно запущен и слушает канал!")
-    except Exception as e:
-        logger.error(f"Ошибка при старте Telethon: {e}")
+# Жесткий перехват ошибок при старте
+logger.info("⏳ Попытка подключения к Telegram API...")
+try:
+    client.loop.run_until_complete(client.connect())
+    if not client.loop.run_until_complete(client.is_user_authorized()):
+        logger.error("❌ КРИТИЧЕСКАЯ ОШИБКА: Сессия не авторизована! Файл сессии не подходит.")
+    else:
+        logger.info("🤖 ЮЗЕРБОТ УСПЕШНО АВТОРИЗОВАН И ПОДКЛЮЧЕН!")
+except Exception as start_error:
+    logger.exception("💥 КРАШ ПРИ СТАРТЕ ЮЗЕРБОТА! Полный трейсбэк ошибки:")
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    await client.disconnect()
