@@ -110,7 +110,9 @@ if client:
                     report += f"❌ **Сбой:** {str(e)}"
                 
                 await client.send_message('me', report)
-
+@app.get("/health")
+async def health_check():
+    return {"status": "ok"}
 @app.on_event("startup")
 async def startup_event():
     if client:
