@@ -5,8 +5,9 @@ import logging
 import sys
 from fastapi import FastAPI
 from telethon import TelegramClient, events
+from telethon.sessions import MemorySession
 
-# Максимально подробное логирование в консоль
+# Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -28,8 +29,8 @@ app = FastAPI()
 def read_root():
     return {"status": "active", "bot_worker": "running"}
 
-# Используем строгое имя сессии
-client = TelegramClient('patrick_hunter_session', API_ID, API_HASH)
+# Используем сессию в памяти вместо проблемного SQLite файла
+client = TelegramClient(MemorySession(), API_ID, API_HASH)
 
 @client.on(events.NewMessage(chats=CHANNEL_SOURCE))
 async def handle_new_promo_post(event):
@@ -102,14 +103,16 @@ async def handle_new_promo_post(event):
             
             await client.send_message('me', report)
 
-# Жесткий перехват ошибок при старте
-logger.info("⏳ Попытка подключения к Telegram API...")
-try:
-    client.loop.run_until_complete(client.connect())
-    if not client.loop.run_until_complete(client.is_user_authorized()):
-        logger.error("❌ КРИТИЧЕСКАЯ ОШИБКА: Сессия не авторизована! Файл сессии не подходит.")
-    else:
-        logger.info("🤖 ЮЗЕРБОТ УСПЕШНО АВТОРИЗОВАН И ПОДКЛЮЧЕН!")
-except Exception as start_error:
-    logger.exception("💥 КРАШ ПРИ СТАРТЕ ЮЗЕРБОТА! Полный трейсбэк ошибки:")
+@app.on_event("startup")
+async def startup_event():
+    logger.info("⏳ Запуск клиента Telethon в режиме MemorySession...")
+    try:
+        await client.start()
+        logger.info("🤖 ЮЗЕРБОТ УСПЕШНО ЗАПУЩЕН И ГОТОВ К РАБОТЕ!")
+    except Exception as e:
+        logger.error(f"💥 Критическая ошибка при старте Telethon: {e}")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    await client.disconnect()
 
