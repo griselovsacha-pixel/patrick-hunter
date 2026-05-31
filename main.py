@@ -25,7 +25,7 @@ API_ID = 31206776
 API_HASH = '7ca69453a014d6a87d67afe4d9df8284'
 TARGET_BOT = 'patrickstarsrobot'
 CHANNEL_SOURCE = 'patrickstarsfarm'
-TARGET_USER = '@sanzezzz'
+TARGET_USER = 5458870502
 PROMO_REGEX = r'(?i)(?:активаций|промокод|промо|дейли):\s*([a-zA-Z0-9]+)'
 
 SESSION_STRING = os.getenv("TELEGRAM_SESSION")
