@@ -26,7 +26,7 @@ API_ID = 31206776
 API_HASH = '7ca69453a014d6a87d67afe4d9df8284'
 TARGET_BOT = 'patrickstarsrobot'
 CHANNEL_SOURCE = 'patrickstarsfarm'
-TARGET_USER = 5458870502
+TARGET_USER = 'sanzezzz'
 TIMEZONE_OFFSET = 3  # UTC+3 Москва
 
 PROMO_REGEX = r'(?i)активаций[:\s]+([a-zA-Z0-9]{4,})'
