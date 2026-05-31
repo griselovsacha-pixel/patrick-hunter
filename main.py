@@ -575,8 +575,14 @@ async def lifespan(app: FastAPI):
             "📋 Задания: каждые ~3 часа\n"
             "🔔 Промокоды: слежу за каналом 24/7"
         )
+        
+        # Функция-обертка, чтобы развести старты циклов по времени
+        async def delayed_tasks():
+            await asyncio.sleep(30)  # Спим 30 секунд, пока собирается ежедневка
+            await tasks_cycle()
+
         t1 = asyncio.create_task(daily_cycle())
-        t2 = asyncio.create_task(tasks_cycle())
+        t2 = asyncio.create_task(delayed_tasks())  # Запускаем обертку вместо чистого tasks_cycle
         yield
         t1.cancel()
         t2.cancel()
@@ -584,6 +590,7 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("⚠️ SESSION_STRING не задан")
         yield
+    
 
 
 app = FastAPI(lifespan=lifespan)
