@@ -80,25 +80,25 @@ def random_task_interval() -> int:
 
 
 # --- Ждём свежий ответ от бота ---
-async def get_bot_response(max_age: int = 45, attempts: int = 5):
+async def open_bot():
+    await client.send_message(TARGET_BOT, '/start')
+    await asyncio.sleep(5)  # фиксированная пауза
+
+
+async def get_bot_response(max_age: int = 120, attempts: int = 8):
+    """Ждёт свежий ответ от бота"""
     for i in range(attempts):
-        await asyncio.sleep(3)
+        await asyncio.sleep(2)
         now = datetime.datetime.now(datetime.timezone.utc)
         async for msg in client.iter_messages(TARGET_BOT, limit=5):
             age = (now - msg.date).total_seconds()
+            logger.info(f"📨 Сообщение age={int(age)}с | text={str(msg.text or '')[:50]} | buttons={bool(msg.buttons)}")
             if age < max_age and (msg.text or msg.buttons):
                 return msg
         logger.info(f"⏳ Жду ответ бота... попытка {i + 1}/{attempts}")
-    # Fallback
     async for msg in client.iter_messages(TARGET_BOT, limit=1):
         return msg
     return None
-
-
-async def open_bot():
-    await client.send_message(TARGET_BOT, '/start')
-    await human_delay(4, 6)
-
 
 # --- Определить WebApp кнопку ---
 def is_webapp_button(btn) -> bool:
