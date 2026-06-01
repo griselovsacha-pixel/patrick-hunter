@@ -27,7 +27,7 @@ API_HASH = '7ca69453a014d6a87d67afe4d9df8284'
 TARGET_BOT = 'patrickstarsrobot'
 CHANNEL_SOURCE = 'patrickstarsfarm'
 TARGET_USER = 'sanzezzz'
-TIMEZONE_OFFSET = 3  # UTC+3 Москва
+TIMEZONE_OFFSET = 3  # UTC+3
 
 PROMO_REGEX = r'(?i)активаций[:\s]+([a-zA-Z0-9]{4,})'
 
@@ -79,13 +79,17 @@ def random_task_interval() -> int:
     return base + extra
 
 
-async def get_fresh_message(max_age: int = 60):
-    await human_delay(3, 5)
-    now = datetime.datetime.now(datetime.timezone.utc)
-    async for msg in client.iter_messages(TARGET_BOT, limit=5):
-        age = (now - msg.date).total_seconds()
-        if age < max_age and (msg.text or msg.buttons):
-            return msg
+# --- Ждём свежий ответ от бота ---
+async def get_bot_response(max_age: int = 45, attempts: int = 5):
+    for i in range(attempts):
+        await asyncio.sleep(3)
+        now = datetime.datetime.now(datetime.timezone.utc)
+        async for msg in client.iter_messages(TARGET_BOT, limit=5):
+            age = (now - msg.date).total_seconds()
+            if age < max_age and (msg.text or msg.buttons):
+                return msg
+        logger.info(f"⏳ Жду ответ бота... попытка {i + 1}/{attempts}")
+    # Fallback
     async for msg in client.iter_messages(TARGET_BOT, limit=1):
         return msg
     return None
@@ -93,15 +97,14 @@ async def get_fresh_message(max_age: int = 60):
 
 async def open_bot():
     await client.send_message(TARGET_BOT, '/start')
-    await human_delay(3, 5)
+    await human_delay(4, 6)
 
 
 # --- Определить WebApp кнопку ---
 def is_webapp_button(btn) -> bool:
     btn_text = btn.text.lower()
     if any(w in btn_text for w in [
-        "запустить приложение",
-        "открыть приложение",
+        "запустить приложение", "открыть приложение",
         "webapp", "open app", "launch app"
     ]):
         return True
@@ -154,92 +157,98 @@ async def collect_daily():
 
         await open_bot()
 
-        # Нажать "Профиль"
+        # Ждём ответ — жмём Профиль
+        msg = await get_bot_response()
+        if not msg or not msg.buttons:
+            await send_report("⚠️ Ежедневка: бот не ответил на /start")
+            return False
+
         profile_clicked = False
-        async for msg in client.iter_messages(TARGET_BOT, limit=5):
-            if msg.buttons:
-                for row in msg.buttons:
-                    for btn in row:
-                        if any(w in btn.text.lower() for w in ["профил", "profile"]):
-                            await btn.click()
-                            logger.info(f"👤 Нажал: {btn.text}")
-                            profile_clicked = True
-                            await human_delay(3, 5)
-                            break
-                    if profile_clicked:
-                        break
+        for row in msg.buttons:
+            for btn in row:
+                if any(w in btn.text.lower() for w in ["профил", "profile"]):
+                    await btn.click()
+                    logger.info(f"👤 Нажал: {btn.text}")
+                    profile_clicked = True
+                    await human_delay(3, 5)
+                    break
             if profile_clicked:
                 break
 
         if not profile_clicked:
-            logger.warning("⚠️ Кнопка Профиль не найдена")
             await send_report("⚠️ Ежедневка: кнопка Профиль не найдена")
             return False
 
-        # Нажать "Ежедневка"
+        # Ждём ответ — жмём Ежедневка
+        msg = await get_bot_response()
+        if not msg or not msg.buttons:
+            await send_report("⚠️ Ежедневка: нет ответа после Профиля")
+            return False
+
         daily_clicked = False
-        async for msg in client.iter_messages(TARGET_BOT, limit=5):
-            if msg.buttons:
-                for row in msg.buttons:
-                    for btn in row:
-                        if any(w in btn.text.lower() for w in ["еже", "daily", "бонус"]):
-                            await btn.click()
-                            logger.info(f"📅 Нажал: {btn.text}")
-                            daily_clicked = True
-                            await human_delay(4, 6)
-                            break
-                    if daily_clicked:
-                        break
+        for row in msg.buttons:
+            for btn in row:
+                if any(w in btn.text.lower() for w in ["еже", "daily", "бонус"]):
+                    await btn.click()
+                    logger.info(f"📅 Нажал: {btn.text}")
+                    daily_clicked = True
+                    await human_delay(4, 6)
+                    break
             if daily_clicked:
                 break
 
         if not daily_clicked:
-            logger.warning("⚠️ Кнопка Ежедневка не найдена")
-            await send_report("⚠️ Ежедневка: кнопка не найдена")
+            await send_report("⚠️ Ежедневка: кнопка не найдена в профиле")
+            return False
+
+        # Ждём капчу
+        msg = await get_bot_response()
+        if not msg:
+            await send_report("⚠️ Ежедневка: нет ответа с капчей")
+            return False
+
+        text = msg.text or ""
+
+        # Уже забрана?
+        if any(w in text.lower() for w in ["уже", "завтра", "получил"]):
+            logger.info("ℹ️ Ежедневка уже забрана")
+            await send_report("ℹ️ Ежедневка уже забрана сегодня")
+            return True
+
+        # Нет кнопок
+        if not msg.buttons:
+            await send_report(f"⚠️ Ежедневка: нет кнопок капчи\n📄 {text[:150]}")
             return False
 
         # Решаем капчу
-        await human_delay(2, 3)
-        async for msg in client.iter_messages(TARGET_BOT, limit=3):
-            if not msg.buttons:
-                continue
+        res = solve_math(text)
+        if res is None:
+            await send_report(f"⚠️ Капча: не нашёл математику\n📄 {text[:100]}")
+            return False
 
-            text = msg.text or ""
+        logger.info(f"🔢 Капча: {text[:60]} | Ответ: {res}")
 
-            if any(w in text.lower() for w in ["уже", "завтра", "получил"]):
-                logger.info("ℹ️ Ежедневка уже забрана")
-                await send_report("ℹ️ Ежедневка уже забрана сегодня")
-                return True
+        found_answer = False
+        for row in msg.buttons:
+            for btn in row:
+                if btn.text.strip() == str(res):
+                    await btn.click()
+                    logger.info(f"✅ Нажал ответ капчи: {res}")
+                    found_answer = True
+                    await human_delay(2, 3)
+                    resp = await get_bot_response()
+                    resp_text = (resp.text or "") if resp else ""
+                    await send_report(
+                        f"📅 Ежедневка собрана!\n"
+                        f"🔢 Капча: {res}\n"
+                        f"📩 Бот: {resp_text[:150]}"
+                    )
+                    return True
 
-            res = solve_math(text)
-            if res is None:
-                logger.warning(f"⚠️ Нет математики в: {text[:100]}")
-                continue
-
-            logger.info(f"🔢 Капча: {text[:60]} | Ответ: {res}")
-
-            found_answer = False
-            for row in msg.buttons:
-                for btn in row:
-                    if btn.text.strip() == str(res):
-                        await btn.click()
-                        logger.info(f"✅ Нажал ответ: {res}")
-                        found_answer = True
-                        await human_delay(2, 3)
-                        async for resp in client.iter_messages(TARGET_BOT, limit=1):
-                            resp_text = resp.text or ""
-                            await send_report(
-                                f"📅 Ежедневка собрана!\n"
-                                f"🔢 Капча решена: {res}\n"
-                                f"📩 Бот: {resp_text[:150]}"
-                            )
-                        return True
-
-            if not found_answer:
-                all_btns = [b.text for row in msg.buttons for b in row]
-                logger.warning(f"⚠️ Ответ {res} не найден: {all_btns}")
-                await send_report(f"⚠️ Капча: ответ {res} не найден среди {all_btns}")
-                return False
+        if not found_answer:
+            all_btns = [b.text for row in msg.buttons for b in row]
+            await send_report(f"⚠️ Капча: ответ {res} не найден среди {all_btns}")
+            return False
 
     except Exception as e:
         logger.error(f"Ошибка ежедневки: {e}")
@@ -271,9 +280,11 @@ async def daily_cycle():
 async def process_one_task(task_msg) -> tuple[str, str]:
     text = task_msg.text or ""
 
+    # Все задания выполнены?
     if any(phrase in text.lower() for phrase in ALL_DONE_PHRASES):
         return 'all_done', text
 
+    # Логируем кнопки
     if task_msg.buttons:
         for row in task_msg.buttons:
             for btn in row:
@@ -281,7 +292,7 @@ async def process_one_task(task_msg) -> tuple[str, str]:
                 btn_type = type(btn).__name__
                 logger.info(f"🔘 '{btn.text}' | url: {url} | type: {btn_type}")
 
-    # WebApp / мини-апп
+    # Мини-апп — сразу пропускаем
     has_webapp = False
     if task_msg.buttons:
         for row in task_msg.buttons:
@@ -294,7 +305,6 @@ async def process_one_task(task_msg) -> tuple[str, str]:
 
     if has_webapp:
         logger.info("🎮 Мини-апп — пропускаю")
-
         skipped = False
         if task_msg.buttons:
             for row in task_msg.buttons:
@@ -362,6 +372,7 @@ async def process_one_task(task_msg) -> tuple[str, str]:
                 action_desc = f"подписался на @{username}"
             action_done = True
 
+    # Тип не определён — пропускаем
     if not action_done:
         logger.warning(f"⚠️ Тип не определён: {text[:150]}")
         await send_report(f"⚠️ Не смог определить задание\n📄 {text[:150]}")
@@ -374,9 +385,11 @@ async def process_one_task(task_msg) -> tuple[str, str]:
                         break
         return 'skip', text[:100]
 
+    # Пауза перед подтверждением
     await human_delay(6, 12)
 
-    fresh_msg = await get_fresh_message()
+    # Ждём кнопку подтверждения
+    fresh_msg = await get_bot_response()
     confirmed = False
     if fresh_msg and fresh_msg.buttons:
         for row in fresh_msg.buttons:
@@ -405,18 +418,21 @@ async def tasks_cycle():
 
             await open_bot()
 
+            # Ждём ответ — жмём Задания
+            msg = await get_bot_response()
+            if not msg or not msg.buttons:
+                await send_report("⚠️ Бот не ответил на /start")
+                await asyncio.sleep(10800)
+                continue
+
             task_opened = False
-            async for msg in client.iter_messages(TARGET_BOT, limit=5):
-                if msg.buttons:
-                    for row in msg.buttons:
-                        for btn in row:
-                            if "задани" in btn.text.lower():
-                                await btn.click()
-                                logger.info(f"📋 Нажал: {btn.text}")
-                                task_opened = True
-                                break
-                        if task_opened:
-                            break
+            for row in msg.buttons:
+                for btn in row:
+                    if "задани" in btn.text.lower():
+                        await btn.click()
+                        logger.info(f"📋 Нажал: {btn.text}")
+                        task_opened = True
+                        break
                 if task_opened:
                     break
 
@@ -432,7 +448,8 @@ async def tasks_cycle():
 
             for i in range(30):
                 logger.info(f"🔄 Задание #{i + 1}")
-                task_msg = await get_fresh_message()
+
+                task_msg = await get_bot_response()
                 if not task_msg:
                     logger.warning("⚠️ Сообщение не получено")
                     await send_report("⚠️ Не получил сообщение от бота")
@@ -495,18 +512,19 @@ if client:
 
             await open_bot()
 
+            msg = await get_bot_response()
+            if not msg or not msg.buttons:
+                await send_report("⚠️ Промокод: бот не ответил")
+                return
+
             profile_clicked = False
-            async for msg in client.iter_messages(TARGET_BOT, limit=5):
-                if msg.buttons:
-                    for row in msg.buttons:
-                        for btn in row:
-                            if any(w in btn.text.lower() for w in ["профил", "profile"]):
-                                await btn.click()
-                                profile_clicked = True
-                                await human_delay(2, 3)
-                                break
-                        if profile_clicked:
-                            break
+            for row in msg.buttons:
+                for btn in row:
+                    if any(w in btn.text.lower() for w in ["профил", "profile"]):
+                        await btn.click()
+                        profile_clicked = True
+                        await human_delay(2, 3)
+                        break
                 if profile_clicked:
                     break
 
@@ -514,45 +532,56 @@ if client:
                 await send_report("⚠️ Промокод: кнопка Профиль не найдена")
                 return
 
-            activated = False
-            async for msg in client.iter_messages(TARGET_BOT, limit=5):
-                if msg.buttons:
-                    for row in msg.buttons:
-                        for btn in row:
-                            if "промо" in btn.text.lower():
-                                await btn.click()
-                                await human_delay(2, 3)
-                                await client.send_message(TARGET_BOT, code)
-                                await human_delay(3, 5)
+            msg = await get_bot_response()
+            if not msg or not msg.buttons:
+                await send_report("⚠️ Промокод: нет ответа после Профиля")
+                return
 
-                                async for resp in client.iter_messages(TARGET_BOT, limit=1):
-                                    resp_text = resp.text or ""
-                                    if resp.buttons:
-                                        for r in resp.buttons:
-                                            for b in r:
-                                                url = getattr(b, 'url', None)
-                                                b_text = b.text.lower()
-                                                if url:
-                                                    tme = re.search(r't\.me/(\+?[a-zA-Z0-9_]+)', url)
-                                                    if tme and not tme.group(1).lower().endswith('bot'):
-                                                        await safe_join(tme.group(1))
-                                                if any(w in b_text for w in [
-                                                    "подписал", "проверить", "готово",
-                                                    "я подписал", "check"
-                                                ]):
-                                                    await human_delay(4, 7)
-                                                    await b.click()
-                                                    logger.info(f"✅ Нажал: {b.text}")
+            promo_clicked = False
+            for row in msg.buttons:
+                for btn in row:
+                    if "промо" in btn.text.lower():
+                        await btn.click()
+                        promo_clicked = True
+                        await human_delay(2, 3)
+                        break
+                if promo_clicked:
+                    break
 
-                                    activated = True
-                                    await send_report(
-                                        f"✅ Промокод `{code}` активирован!\n"
-                                        f"📩 Бот: {resp_text[:100]}"
-                                    )
-                                return
+            if not promo_clicked:
+                await send_report("⚠️ Не нашёл кнопку промокода")
+                return
 
-            if not activated:
-                await send_report(f"⚠️ Не нашёл кнопку промокода для: `{code}`")
+            await client.send_message(TARGET_BOT, code)
+            await human_delay(3, 5)
+
+            resp = await get_bot_response()
+            if not resp:
+                await send_report(f"⚠️ Промокод `{code}`: нет ответа от бота")
+                return
+
+            resp_text = resp.text or ""
+
+            if resp.buttons:
+                for r in resp.buttons:
+                    for b in r:
+                        url = getattr(b, 'url', None)
+                        b_text = b.text.lower()
+                        if url:
+                            tme = re.search(r't\.me/(\+?[a-zA-Z0-9_]+)', url)
+                            if tme and not tme.group(1).lower().endswith('bot'):
+                                await safe_join(tme.group(1))
+                        if any(w in b_text for w in [
+                            "подписал", "проверить", "готово", "я подписал", "check"
+                        ]):
+                            await human_delay(4, 7)
+                            await b.click()
+                            logger.info(f"✅ Нажал: {b.text}")
+
+            await send_report(
+                f"✅ Промокод `{code}` активирован!\n"
+                f"📩 Бот: {resp_text[:100]}"
+            )
 
 
 # --- Lifespan ---
@@ -567,14 +596,13 @@ async def lifespan(app: FastAPI):
             "📋 Задания: каждые ~3 часа\n"
             "🔔 Промокоды: слежу за каналом 24/7"
         )
-        
-        # Функция-обертка, чтобы развести старты циклов по времени
+
         async def delayed_tasks():
-            await asyncio.sleep(30)  # Спим 30 секунд, пока собирается ежедневка
+            await asyncio.sleep(30)
             await tasks_cycle()
 
         t1 = asyncio.create_task(daily_cycle())
-        t2 = asyncio.create_task(delayed_tasks())  # Запускаем обертку вместо чистого tasks_cycle
+        t2 = asyncio.create_task(delayed_tasks())
         yield
         t1.cancel()
         t2.cancel()
@@ -582,7 +610,6 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("⚠️ SESSION_STRING не задан")
         yield
-    
 
 
 app = FastAPI(lifespan=lifespan)
