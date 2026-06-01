@@ -151,8 +151,33 @@ async def safe_join(target: str):
     except Exception as e:
         logger.error(f"Ошибка вступления {target}: {e}")
 
+# Маппинг эмодзи фруктов → ключевые слова
+FRUIT_MAP = {
+    "🍎": ["яблок", "apple"],
+    "🍊": ["апельсин", "orange"],
+    "🍋": ["лимон", "lemon"],
+    "🍇": ["виноград", "grape"],
+    "🍓": ["клубник", "strawberry"],
+    "🍒": ["вишн", "черешн", "cherry"],
+    "🍑": ["персик", "peach"],
+    "🍍": ["ананас", "pineapple"],
+    "🍌": ["банан", "banana"],
+    "🍅": ["помидор", "томат", "tomato"],
+    "🥝": ["киви", "kiwi"],
+    "🍐": ["груш", "pear"],
+    "🫐": ["черник", "голубик", "blueberry"],
+    "🥭": ["манго", "mango"],
+    "🍉": ["арбуз", "watermelon"],
+    "🍈": ["дын", "melon"],
+    "🌽": ["кукуруз", "corn"],
+    "🥑": ["авокадо", "avocado"],
+    "🍆": ["баклажан", "eggplant"],
+    "🥕": ["морков", "carrot"],
+}
+
+
 async def solve_captcha_if_needed(msg) -> bool:
-    """Решает капчу если она есть. Поддерживает математику и выбор фрукта/предмета."""
+    """Решает капчу. Поддерживает математику и выбор фрукта по эмодзи."""
     if not msg:
         return False
 
@@ -161,7 +186,7 @@ async def solve_captcha_if_needed(msg) -> bool:
     if "проверка на робота" not in text.lower():
         return True  # капчи нет
 
-    logger.info(f"🤖 Капча обнаружена: {text[:100]}")
+    logger.info(f"🤖 Капча обнаружена: {text[:150]}")
 
     if not msg.buttons:
         await send_report("⚠️ Капча без кнопок — не могу решить")
@@ -184,28 +209,50 @@ async def solve_captcha_if_needed(msg) -> bool:
         await send_report(f"⚠️ Матем. капча: ответ {res} не найден среди {all_btns}")
         return False
 
-    # Тип 2: «Киви», «Клубника» и т.д. — ищем слово в кавычках «»
-    word_match = re.search(r'[«"\'"]([^»"\']+)[»"\'"]', text)
+    # Тип 2: фруктовая капча «Виноград» → ищем 🍇
+    # Убираем markdown ** из текста
+    clean_text = re.sub(r"\*+", "", text).lower()
+    word_match = re.search(r"[«\"'](\S+)[»\"\']", clean_text)
     if word_match:
         target_word = word_match.group(1).lower().strip()
-        logger.info(f"🔍 Ищу кнопку с: '{target_word}'")
+        logger.info(f"🔍 Ищу фрукт: '{target_word}'")
 
+        # Ищем эмодзи для этого фрукта
+        target_emoji = None
+        for emoji, keywords in FRUIT_MAP.items():
+            for kw in keywords:
+                if kw in target_word or target_word in kw:
+                    target_emoji = emoji
+                    logger.info(f"🍎 Нашёл эмодзи для '{target_word}': {emoji}")
+                    break
+            if target_emoji:
+                break
+
+        # Нажимаем кнопку с нужным эмодзи
         for row in msg.buttons:
             for btn in row:
-                btn_clean = btn.text.lower()
-                # Убираем эмодзи для чистого сравнения
-                btn_clean_no_emoji = re.sub(r'[^\w\s]', '', btn_clean).strip()
-                if target_word in btn_clean or target_word in btn_clean_no_emoji:
+                btn_text = btn.text.strip()
+                if target_emoji and target_emoji in btn_text:
                     await btn.click()
-                    logger.info(f"✅ Фруктовая капча: нажал '{btn.text}'")
+                    logger.info(f"✅ Фруктовая капча: нажал '{btn_text}'")
                     await human_delay(2, 3)
-                    await send_report(f"🤖 Капча (фрукт) решена! Нажал: {btn.text}")
+                    await send_report(f"🤖 Капча решена! '{target_word}' → {btn_text}")
+                    return True
+                # Fallback: ищем слово напрямую в тексте кнопки
+                if target_word in btn_text.lower():
+                    await btn.click()
+                    logger.info(f"✅ Фруктовая капча (текст): нажал '{btn_text}'")
+                    await human_delay(2, 3)
+                    await send_report(f"🤖 Капча решена! Нажал: {btn_text}")
                     return True
 
-        await send_report(f"⚠️ Капча: не нашёл '{target_word}' среди {all_btns}")
+        await send_report(
+            f"⚠️ Капча: не нашёл '{target_word}' (эмодзи: {target_emoji})"
+            f" среди {all_btns}"
+        )
         return False
 
-    await send_report(f"⚠️ Капча: неизвестный тип\n📄 {text[:150]}\n🔘 Кнопки: {all_btns}")
+    await send_report(f"⚠️ Капча: неизвестный тип\n📄 {text[:150]}\n🔘 {all_btns}")
     return False
 
 
