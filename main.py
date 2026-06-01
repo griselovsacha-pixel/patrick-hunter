@@ -82,7 +82,16 @@ def random_task_interval() -> int:
 # --- Ждём свежий ответ от бота ---
 async def open_bot():
     await client.send_message(TARGET_BOT, '/start')
-    await asyncio.sleep(5)  # фиксированная пауза
+    await asyncio.sleep(5)
+    
+    # Проверяем нет ли капчи
+    msg = await get_bot_response()
+    if msg:
+        captcha_solved = await solve_captcha_if_needed(msg)
+        if captcha_solved and "проверка" in (msg.text or "").lower():
+            # Капча была — после решения ждём главное меню
+            await asyncio.sleep(3)
+    return msg
 
 
 async def get_bot_response(max_age: int = 120, attempts: int = 8):
@@ -136,6 +145,43 @@ async def safe_join(target: str):
         logger.warning(f"⚠️ Невалидный инвайт: {target}")
     except Exception as e:
         logger.error(f"Ошибка вступления {target}: {e}")
+
+async def solve_captcha_if_needed(msg) -> bool:
+    """Проверяет есть ли капча и решает её. Возвращает True если капча решена или её нет."""
+    if not msg:
+        return False
+    
+    text = msg.text or ""
+    
+    # Проверяем это капча?
+    if "проверка на робота" not in text.lower() and "посчитай" not in text.lower():
+        return True  # капчи нет — всё ок
+    
+    logger.info("🤖 Обнаружена капча при старте!")
+    
+    if not msg.buttons:
+        await send_report("⚠️ Капча без кнопок — не могу решить")
+        return False
+    
+    res = solve_math(text)
+    if res is None:
+        await send_report(f"⚠️ Капча: не нашёл математику\n📄 {text[:100]}")
+        return False
+    
+    logger.info(f"🔢 Капча старта: {text[:60]} | Ответ: {res}")
+    
+    for row in msg.buttons:
+        for btn in row:
+            if btn.text.strip() == str(res):
+                await btn.click()
+                logger.info(f"✅ Капча решена: {res}")
+                await human_delay(2, 3)
+                await send_report(f"🤖 Капча при старте решена! Ответ: {res}")
+                return True
+    
+    all_btns = [b.text for row in msg.buttons for b in row]
+    await send_report(f"⚠️ Капча старта: ответ {res} не найден среди {all_btns}")
+    return False
 
 
 # --- Запуск другого бота ---
