@@ -29,7 +29,7 @@ CHANNEL_SOURCE = 'patrickstarsfarm'
 TARGET_USER = 'sanzezzz'
 TIMEZONE_OFFSET = 3  # UTC+3
 
-PROMO_REGEX = r'(?i)активаций[:\s]+([a-zA-Z0-9]{4,})'
+PROMO_REGEX = r'(?i)активаций.*?[:\s]\s*([a-zA-Z0-9]{4,})'
 
 ALL_DONE_PHRASES = [
     "выполнил все задания",
@@ -620,6 +620,9 @@ async def tasks_cycle():
             completed = 0
             skipped = 0
             reports = []
+            
+            # Переменная для отслеживания ID предыдущего сообщения
+            last_task_msg_id = None  
 
             for i in range(30):
                 logger.info(f"🔄 Задание #{i + 1}")
@@ -629,6 +632,35 @@ async def tasks_cycle():
                     logger.warning("⚠️ Сообщение не получено")
                     await send_report("⚠️ Не получил сообщение от бота")
                     break
+
+                # ПРОВЕРКА НА ПОВТОР: если ID совпадает с прошлым шагом
+                if last_task_msg_id and task_msg.id == last_task_msg_id:
+                    logger.warning(f"⚠️ Обнаружен повтор сообщения ID {task_msg.id}. Пытаюсь пропустить...")
+                    
+                    # Пробуем нажать "пропустить", если кнопка есть
+                    skipped_by_button = False
+                    if task_msg.buttons:
+                        for row in task_msg.buttons:
+                            for btn in row:
+                                if "пропустить" in btn.text.lower():
+                                    await btn.click()
+                                    logger.info("⏭️ Нажал Пропустить для выхода из цикла повтора")
+                                    skipped_by_button = True
+                                    await human_delay(3, 5)
+                                    break
+                            if skipped_by_button:
+                                break
+                    
+                    if skipped_by_button:
+                        skipped += 1
+                        continue
+                    else:
+                        # Если кнопки "пропустить" нет — прерываем цикл, чтобы не зацикливаться вечно
+                        await send_report(f"⚠️ Задание зациклилось, а кнопки 'Пропустить' нет. Сплю до следующего цикла.")
+                        break
+
+                # Запоминаем текущий ID перед обработкой
+                last_task_msg_id = task_msg.id
 
                 result, desc = await process_one_task(task_msg)
 
@@ -672,7 +704,7 @@ async def tasks_cycle():
             logger.error(f"Ошибка заданий: {e}")
             await send_report(f"❌ Ошибка заданий: {e}")
             await asyncio.sleep(1800)
-
+            
 
 # --- Промокоды из канала ---
 if client:
