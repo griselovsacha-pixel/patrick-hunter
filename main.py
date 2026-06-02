@@ -47,36 +47,36 @@ IGNORED_WORDS = {
     "tgwebapp", "startapp", "go", "app", "link", "channel", "group", "send"
 }
 
-SESSION_STRING = os.getenv("TELEGRAM_SESSION")[cite: 1]
-client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH) if SESSION_STRING else None[cite: 1]
+SESSION_STRING = os.getenv("TELEGRAM_SESSION")
+client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH) if SESSION_STRING else None
 
 
 # --- Утилиты ---
-def solve_math(text: str):[cite: 1]
-    match = re.search(r'(\d+)\s*([\+\-\*\/])\s*(\d+)\s*=\s*\?', text)[cite: 1]
-    if match:[cite: 1]
-        a, op, b = int(match.group(1)), match.group(2), int(match.group(3))[cite: 1]
-        if op == '+': return a + b[cite: 1]
-        if op == '-': return a - b[cite: 1]
-        if op == '*': return a * b[cite: 1]
-        if op == '/' and b != 0: return a // b[cite: 1]
-    expression = re.sub(r'[^\d\+\-\*\/\(\)\s]', '', text)[cite: 1]
-    try:[cite: 1]
-        return int(eval(expression))[cite: 1]
-    except Exception:[cite: 1]
-        return None[cite: 1]
+def solve_math(text: str):
+    match = re.search(r'(\d+)\s*([\+\-\*\/])\s*(\d+)\s*=\s*\?', text)
+    if match:
+        a, op, b = int(match.group(1)), match.group(2), int(match.group(3))
+        if op == '+': return a + b
+        if op == '-': return a - b
+        if op == '*': return a * b
+        if op == '/' and b != 0: return a // b
+    expression = re.sub(r'[^\d\+\-\*\/\(\)\s]', '', text)
+    try:
+        return int(eval(expression))
+    except Exception:
+        return None
 
 
-async def human_delay(min_sec: float = 2.0, max_sec: float = 4.0):[cite: 1]
-    await asyncio.sleep(random.uniform(min_sec, max_sec))[cite: 1]
+async def human_delay(min_sec: float = 2.0, max_sec: float = 4.0):
+    await asyncio.sleep(random.uniform(min_sec, max_sec))
 
 
-async def send_report(text: str):[cite: 1]
-    try:[cite: 1]
-        await client.send_message(TARGET_USER, text)[cite: 1]
-        logger.info(f"📤 Отчёт: {text[:80]}")[cite: 1]
-    except Exception as e:[cite: 1]
-        logger.error(f"Ошибка отправки отчёта: {e}")[cite: 1]
+async def send_report(text: str):
+    try:
+        await client.send_message(TARGET_USER, text)
+        logger.info(f"📤 Отчёт: {text[:80]}")
+    except Exception as e:
+        logger.error(f"Ошибка отправки отчёта: {e}")
 
 
 def random_task_interval() -> int:[cite: 1]
