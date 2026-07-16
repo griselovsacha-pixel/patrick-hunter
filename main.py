@@ -119,7 +119,6 @@ async def human_delay(config: Dict, action: str = "click"):
     delay_config = DELAYS.get(action, (1.0, 3.0))
     delay_min = delay_config[0] * config.get("delay_multiplier", 1.0)
     delay_max = delay_config[1] * config.get("delay_multiplier", 1.0)
-    # Добавляем случайность
     delay = random.uniform(delay_min, delay_max)
     await asyncio.sleep(delay)
 
@@ -147,12 +146,10 @@ def find_promo_in_text(text: str):
     if not any(w in lower_text for w in ["промо", "активац", "promo"]):
         return None
 
-    # Быстрый поиск паттерна "активаций: КОД"
     exact = re.search(r'активаций\s*:\s*([a-zA-Z0-9]{3,20})', text, re.IGNORECASE)
     if exact:
         return exact.group(1)
 
-    # Поиск по словам
     clean_text = re.sub(r'[^\w\s]', ' ', text)
     words = clean_text.split()
     
@@ -163,7 +160,6 @@ def find_promo_in_text(text: str):
                 if re.match(r'^[a-zA-Z0-9]{3,20}$', candidate):
                     return candidate
     
-    # Поиск любого слова из 5-15 символов после маркера
     for i, word in enumerate(words):
         if word.lower() in ["активаций", "промокод", "promo", "код"]:
             if i + 1 < len(words):
@@ -188,9 +184,8 @@ async def get_bot_response(client, config: Dict, max_age: int = 120, attempts: i
         except Exception as e:
             logger.debug(f"Ошибка получения ответа: {e}")
         
-        await asyncio.sleep(0.8)  # Быстрый повтор
+        await asyncio.sleep(0.8)
     
-    # Финальная попытка
     try:
         async for msg in client.iter_messages(target_bot, limit=1):
             return msg
@@ -238,7 +233,6 @@ async def solve_captcha_if_needed(client, config: Dict, msg) -> bool:
     if not msg.buttons:
         return False
 
-    # Математика
     res = solve_math(text)
     if res is not None:
         for row in msg.buttons:
@@ -249,7 +243,6 @@ async def solve_captcha_if_needed(client, config: Dict, msg) -> bool:
                     return True
         return False
 
-    # Фрукты
     clean_text = re.sub(r"\*+", "", text).lower()
     word_match = re.search(r"[«\"'“”‘’](.+?)[»\"'“”‘’]", clean_text)
     if word_match:
@@ -289,7 +282,6 @@ async def _open_bot_unlocked(client, config: Dict, retries: int = 2):
                     continue
                 return None
 
-            # Обработка капчи и гейтов
             for _ in range(3):
                 if not msg:
                     return None
@@ -409,7 +401,7 @@ async def promo_queue_processor():
                 is_processing_promo = False
                 promo_queue.task_done()
                 
-            await asyncio.sleep(random.uniform(5, 12))  # Короткая задержка
+            await asyncio.sleep(random.uniform(5, 12))
             
         except Exception as e:
             logger.error(f"Ошибка в очереди: {e}")
@@ -425,7 +417,6 @@ async def activate_promo_fast(client, config: Dict, code: str) -> bool:
         if not msg or not msg.buttons:
             return False
 
-        # Профиль
         profile_clicked = False
         for row in msg.buttons:
             for btn in row:
@@ -444,7 +435,6 @@ async def activate_promo_fast(client, config: Dict, code: str) -> bool:
         if not msg or not msg.buttons:
             return False
 
-        # Промо
         promo_clicked = False
         for row in msg.buttons:
             for btn in row:
@@ -459,7 +449,6 @@ async def activate_promo_fast(client, config: Dict, code: str) -> bool:
         if not promo_clicked:
             return False
 
-        # Ввод кода
         await client.send_message(target_bot, code)
         await human_delay(config, "promo")
 
@@ -472,7 +461,6 @@ async def activate_promo_fast(client, config: Dict, code: str) -> bool:
         if any(w in resp_text.lower() for w in ["неверн", "не найден", "истёк", "уже использован"]):
             return True
 
-        # Подтверждение
         if resp.buttons:
             for r in resp.buttons:
                 for b in r:
@@ -516,11 +504,9 @@ class ChannelMonitor:
                     
                     raw = msg.text or ""
                     
-                    # Мгновенная проверка чека
                     if msg.buttons:
                         asyncio.create_task(try_claim_check_instant(client, self.config, msg))
                     
-                    # Мгновенная проверка промо
                     code = find_promo_in_text(raw)
                     if code:
                         logger.info(f"🔔 [{self.account_name}] Промо: {code}")
@@ -529,7 +515,6 @@ class ChannelMonitor:
                     if self.last_checked_id is None or msg.id > self.last_checked_id:
                         self.last_checked_id = msg.id
                 
-                # Быстрый сон
                 interval = self.check_interval + random.uniform(-0.5, 1.0)
                 await asyncio.sleep(max(0.5, interval))
                 
@@ -590,7 +575,6 @@ async def collect_daily(client, config: Dict) -> int:
         if not msg or not msg.buttons:
             return 3600
 
-        # Профиль
         profile_clicked = False
         for row in msg.buttons:
             for btn in row:
@@ -609,7 +593,6 @@ async def collect_daily(client, config: Dict) -> int:
         if not msg or not msg.buttons:
             return 3600
 
-        # Ежедневка
         daily_clicked = False
         for row in msg.buttons:
             for btn in row:
@@ -675,7 +658,6 @@ async def tasks_cycle(client, config: Dict):
                 await asyncio.sleep(1800)
                 continue
 
-            # Кнопка заданий
             task_opened = False
             for row in msg.buttons:
                 for btn in row:
@@ -694,12 +676,11 @@ async def tasks_cycle(client, config: Dict):
             completed = 0
             skipped = 0
             
-            for i in range(30):  # Максимум 30 заданий за цикл
+            for i in range(30):
                 task_msg = await get_bot_response(client, config)
                 if not task_msg:
                     break
 
-                # Проверяем, что все задания выполнены
                 if any(phrase in (task_msg.text or "").lower() for phrase in ALL_DONE_PHRASES):
                     logger.info(f"✅ [{account_name}] Все задания выполнены!")
                     break
@@ -717,11 +698,9 @@ async def tasks_cycle(client, config: Dict):
                     logger.info(f"⏭️ [{account_name}] Пропущено: {desc[:50]}")
                     await human_delay(config, "task")
 
-                # Если много заданий - делаем паузу
                 if completed > 0 and completed % 5 == 0:
                     await asyncio.sleep(random.uniform(5, 10))
 
-            # Интервал до следующего цикла
             account_name_key = config.get("name", "main")
             intervals = TASK_INTERVALS.get(account_name_key, (5400, 9000))
             interval = random.randint(intervals[0], intervals[1])
@@ -737,9 +716,21 @@ async def tasks_cycle(client, config: Dict):
             logger.error(f"Ошибка [{account_name}]: {e}")
             await asyncio.sleep(1800)
 
+# --- ИСПРАВЛЕННАЯ ФУНКЦИЯ ОБРАБОТКИ ЗАДАНИЙ ---
 async def process_one_task(client, config: Dict, task_msg) -> tuple:
     """Обработка одного задания - ВСЕ ВЫПОЛНЯЕМ"""
     text = task_msg.text or ""
+    
+    # === НОВАЯ ПРОВЕРКА НА /start ===
+    if text.strip() == "/start" or text.strip().lower() == "start":
+        # Ищем кнопку "Пропустить"
+        if task_msg.buttons:
+            for row in task_msg.buttons:
+                for btn in row:
+                    if "пропустить" in btn.text.lower():
+                        await btn.click()
+                        return 'skip', 'команда start (пропущено)'
+        return 'skip', 'команда start'
     
     if any(phrase in text.lower() for phrase in ALL_DONE_PHRASES):
         return 'all_done', text
@@ -780,7 +771,6 @@ async def process_one_task(client, config: Dict, task_msg) -> tuple:
                         action_parts.append(f"подписался на {target}")
                         action_done = True
 
-    # Если нет кнопок с ссылками, ищем ссылки в тексте
     if not action_done:
         for target in re.findall(r't\.me/(\+?[a-zA-Z0-9_]+)', text):
             if target.lower().endswith('bot'):
@@ -790,14 +780,11 @@ async def process_one_task(client, config: Dict, task_msg) -> tuple:
             action_parts.append(f"подписался на {target}")
             action_done = True
 
-    # Если есть кнопка подтверждения - считаем что задание выполнено
     if not action_done and confirm_btn:
         action_done = True
         action_parts.append("ознакомился")
 
-    # Если ничего не нашли - пропускаем
     if not action_done:
-        # Пробуем нажать пропустить
         if task_msg.buttons:
             for row in task_msg.buttons:
                 for btn in row:
@@ -808,13 +795,11 @@ async def process_one_task(client, config: Dict, task_msg) -> tuple:
 
     await human_delay(config, "click")
 
-    # Жмём подтверждение
     if confirm_btn:
         await confirm_btn.click()
         await human_delay(config, "click")
         return 'done', ", ".join(action_parts)
 
-    # Ищем кнопку подтверждения в новом сообщении
     fresh_msg = await get_bot_response(client, config)
     if fresh_msg and fresh_msg.buttons:
         for row in fresh_msg.buttons:
@@ -871,7 +856,6 @@ async def handle_webapp_task(client, config: Dict, task_msg):
                             return 'done', 'startapp ✅'
             return 'done', 'startapp'
 
-    # Пропускаем
     for row in task_msg.buttons:
         for btn in row:
             if "пропустить" in btn.text.lower():
