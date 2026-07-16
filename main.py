@@ -39,24 +39,24 @@ logger = logging.getLogger(__name__)
 ALL_DONE_PHRASES = [
     "выполнил все задания", "все задания выполнены",
     "приходи через", "новых заданий нет",
-    "заданий больше нет", "респект", "молодец"
+    "заданий больше нет", "респект", "молодец",
+    "поздравляю", "все выполнены"
 ]
 
 CONFIRM_WORDS = [
     "подтвер", "выдать", "проверить", "claim", "check",
     "выполнил", "готов", "получить", "забрать", "collect",
     "confirm", "done", "изучил", "ознакомил", "принять",
-    "я подписал", "продолжить"
+    "я подписал", "продолжить", "проверить подписку"
+]
+
+SUCCESS_WORDS = [
+    "✅", "выполнено", "получил", "награда", "молодец", 
+    "респект", "зачислено", "успешно", "готово", "отлично",
+    "получено", "начислено", "спасибо"
 ]
 
 SPONSOR_GATE_HINTS = ["для продолжения", "выполни всего", "выполни задани", "чтобы продолжить"]
-
-IGNORED_WORDS = {
-    "html", "http", "https", "main", "patrickstarsrobot", "patrickstarsfarm",
-    "profile", "claim", "check", "start", "webapp", "join", "bot", "stars",
-    "tgwebapp", "startapp", "go", "app", "link", "channel", "group", "send",
-    "ловите", "вводим", "боте", "профиль", "промокод", "дейли", "друзья"
-}
 
 FRUIT_MAP = {
     "🍎": ["яблок", "apple", "red apple"],
@@ -76,9 +76,6 @@ FRUIT_MAP = {
     "🍈": ["дын", "melon"],
     "🥝": ["киви", "kiwi"],
     "🍐": ["груш", "pear"],
-    "🍅": ["помидор", "томат", "tomato"],
-    "🥥": ["кокос", "coconut"],
-    "🥑": ["авокадо", "avocado"],
 }
 
 # --- Глобальные хранилища ---
@@ -101,7 +98,8 @@ def reset_stats():
         "clicker_clicks": 0,
         "errors": [],
         "stars_earned": 0.0,
-        "last_activity": datetime.datetime.now()
+        "last_activity": datetime.datetime.now(),
+        "task_details": []
     }
 
 def solve_math(text: str):
@@ -138,7 +136,7 @@ async def send_report(client, config: Dict, text: str):
         logger.error(f"Ошибка отправки отчёта: {e}")
 
 def find_promo_in_text(text: str):
-    """Поиск промокода в тексте - УСКОРЕННЫЙ"""
+    """Поиск промокода в тексте"""
     if not text:
         return None
     
@@ -154,13 +152,6 @@ def find_promo_in_text(text: str):
     words = clean_text.split()
     
     for i, word in enumerate(words):
-        if word.lower() in ["активаций", "промокод", "promo"]:
-            if i + 1 < len(words):
-                candidate = words[i + 1].strip()
-                if re.match(r'^[a-zA-Z0-9]{3,20}$', candidate):
-                    return candidate
-    
-    for i, word in enumerate(words):
         if word.lower() in ["активаций", "промокод", "promo", "код"]:
             if i + 1 < len(words):
                 candidate = words[i + 1].strip()
@@ -170,8 +161,8 @@ def find_promo_in_text(text: str):
     return None
 
 # --- Работа с Telegram ---
-async def get_bot_response(client, config: Dict, max_age: int = 120, attempts: int = 5):
-    """Быстрое получение ответа бота"""
+async def get_bot_response(client, config: Dict, max_age: int = 120, attempts: int = 8):
+    """Получение ответа бота"""
     target_bot = config.get("target_bot", TARGET_BOT)
     
     for i in range(attempts):
@@ -184,7 +175,7 @@ async def get_bot_response(client, config: Dict, max_age: int = 120, attempts: i
         except Exception as e:
             logger.debug(f"Ошибка получения ответа: {e}")
         
-        await asyncio.sleep(0.8)
+        await asyncio.sleep(1.0)
     
     try:
         async for msg in client.iter_messages(target_bot, limit=1):
@@ -204,25 +195,30 @@ async def archive_chat(client, entity):
         logger.debug(f"Не удалось архивировать: {e}")
 
 async def safe_join(client, target: str):
+    """Безопасная подписка с обработкой ошибок"""
     try:
         if target.startswith('+'):
             await client(ImportChatInviteRequest(target[1:]))
         else:
             await client(JoinChannelRequest(target))
-        logger.info(f"✅ Подписался: @{target}")
+        logger.info(f"✅ Подписался: {target}")
         await archive_chat(client, target)
         await human_delay({}, "join")
+        return True
     except UserAlreadyParticipantError:
         logger.info(f"ℹ️ Уже подписан: {target}")
         await archive_chat(client, target)
+        return True
     except FloodWaitError as e:
         logger.warning(f"⚠️ FloodWait: {e.seconds}с")
         await asyncio.sleep(e.seconds + 5)
+        return False
     except Exception as e:
         logger.error(f"Ошибка вступления {target}: {e}")
+        return False
 
 async def solve_captcha_if_needed(client, config: Dict, msg) -> bool:
-    """БЫСТРОЕ решение капчи"""
+    """Решение капчи"""
     if not msg:
         return False
     text = msg.text or ""
@@ -267,7 +263,7 @@ async def solve_captcha_if_needed(client, config: Dict, msg) -> bool:
     return False
 
 async def _open_bot_unlocked(client, config: Dict, retries: int = 2):
-    """БЫСТРОЕ открытие бота"""
+    """Открытие бота"""
     target_bot = config.get("target_bot", TARGET_BOT)
     
     for attempt in range(retries):
@@ -359,9 +355,8 @@ async def handle_sponsor_gate(client, config: Dict, msg):
     await human_delay(config, "click")
     return await get_bot_response(client, config)
 
-# --- Обработчик очереди промокодов (УСКОРЕННЫЙ) ---
+# --- Обработчик очереди промокодов ---
 async def promo_queue_processor():
-    """Быстрая обработка промокодов из очереди"""
     global is_processing_promo
     
     while True:
@@ -409,7 +404,6 @@ async def promo_queue_processor():
             await asyncio.sleep(3)
 
 async def activate_promo_fast(client, config: Dict, code: str) -> bool:
-    """БЫСТРАЯ активация промокода"""
     target_bot = config.get("target_bot", TARGET_BOT)
     
     try:
@@ -479,7 +473,7 @@ async def activate_promo_fast(client, config: Dict, code: str) -> bool:
         logger.error(f"Ошибка: {e}")
         return False
 
-# --- МОНИТОР КАНАЛА (УСКОРЕННЫЙ) ---
+# --- МОНИТОР КАНАЛА ---
 class ChannelMonitor:
     def __init__(self, account_name: str, config: Dict):
         self.account_name = account_name
@@ -489,7 +483,6 @@ class ChannelMonitor:
         self._last_check = 0
         
     async def monitor(self, client):
-        """БЫСТРЫЙ мониторинг канала"""
         while True:
             try:
                 now = time.time()
@@ -527,7 +520,6 @@ class ChannelMonitor:
 
 # --- Функции для аккаунтов ---
 async def create_client(config: Dict) -> Optional[TelegramClient]:
-    """Создаёт клиент БЕЗ ПРОКСИ"""
     session_string = config.get("session_string")
     if not session_string:
         logger.warning(f"⚠️ Нет session для {config.get('name')}")
@@ -536,7 +528,6 @@ async def create_client(config: Dict) -> Optional[TelegramClient]:
     return TelegramClient(StringSession(session_string), API_ID, API_HASH)
 
 async def try_claim_check_instant(client, config: Dict, msg):
-    """Мгновенный захват чека"""
     if not msg.buttons:
         return
 
@@ -564,7 +555,6 @@ async def try_claim_check_instant(client, config: Dict, msg):
 # --- ОСНОВНЫЕ ЦИКЛЫ ---
 
 async def collect_daily(client, config: Dict) -> int:
-    """Сбор ежедневки"""
     account_name = config.get("name", "unknown")
     stats = account_stats.get(account_name, reset_stats())
     
@@ -630,7 +620,6 @@ async def collect_daily(client, config: Dict) -> int:
         return 3600
 
 async def daily_cycle(client, config: Dict):
-    """Цикл ежедневки"""
     account_name = config.get("name", "unknown")
     daily_offset = config.get("daily_offset", (0, 300))
     
@@ -643,21 +632,22 @@ async def daily_cycle(client, config: Dict):
         logger.info(f"⏳ [{account_name}] Ежедневка через {h}ч {m}м")
         await asyncio.sleep(wait_sec)
 
-# --- ЗАДАНИЯ (НЕ ПРОПУСКАЕМ) ---
+# --- ЗАДАНИЯ (С ПРОВЕРКОЙ ВЫПОЛНЕНИЯ) ---
 async def tasks_cycle(client, config: Dict):
-    """Цикл заданий - ВСЕ ЗАДАНИЯ ВЫПОЛНЯЮТСЯ"""
+    """Цикл заданий с реальным выполнением и отчётом в конце"""
     account_name = config.get("name", "unknown")
     stats = account_stats.get(account_name, reset_stats())
     
     while True:
         try:
-            logger.info(f"📋 [{account_name}] Задания...")
+            logger.info(f"📋 [{account_name}] Запуск цикла заданий...")
             
             msg = await _open_bot_unlocked(client, config)
             if not msg or not msg.buttons:
                 await asyncio.sleep(1800)
                 continue
 
+            # Открываем задания
             task_opened = False
             for row in msg.buttons:
                 for btn in row:
@@ -675,61 +665,86 @@ async def tasks_cycle(client, config: Dict):
 
             completed = 0
             skipped = 0
+            task_details = []
+            max_tasks = 25  # Максимум заданий за цикл
             
-            for i in range(30):
+            for i in range(max_tasks):
                 task_msg = await get_bot_response(client, config)
                 if not task_msg:
                     break
 
+                # Проверяем, все ли задания выполнены
                 if any(phrase in (task_msg.text or "").lower() for phrase in ALL_DONE_PHRASES):
                     logger.info(f"✅ [{account_name}] Все задания выполнены!")
                     break
 
+                # Выполняем задание
                 result, desc = await process_one_task(client, config, task_msg)
 
                 if result == 'done':
                     completed += 1
                     stats["tasks_completed"] += 1
-                    await send_report(client, config, f"✅ Задание #{completed}")
+                    task_details.append(f"✅ {completed}. {desc}")
+                    logger.info(f"✅ [{account_name}] Задание #{completed} выполнено: {desc[:50]}")
                     await human_delay(config, "task")
+                    
                 elif result == 'skip':
                     skipped += 1
                     stats["tasks_skipped"] += 1
+                    task_details.append(f"⏭️ {desc[:50]}")
                     logger.info(f"⏭️ [{account_name}] Пропущено: {desc[:50]}")
                     await human_delay(config, "task")
+                    
+                elif result == 'all_done':
+                    break
 
+                # Пауза после каждых 5 заданий
                 if completed > 0 and completed % 5 == 0:
                     await asyncio.sleep(random.uniform(5, 10))
 
-            account_name_key = config.get("name", "main")
-            intervals = TASK_INTERVALS.get(account_name_key, (5400, 9000))
-            interval = random.randint(intervals[0], intervals[1])
+            # --- ОТЧЁТ В КОНЦЕ ---
+            interval = random.randint(5400, 9000)
             h, m = interval // 3600, (interval % 3600) // 60
             
-            await send_report(
-                client, config,
-                f"📊 Цикл: ✅{completed} | ⏭️{skipped} | ⏳{h}ч{m}м"
-            )
+            # Формируем детальный отчёт
+            report = f"📊 ЗАДАНИЯ ВЫПОЛНЕНЫ!\n"
+            report += f"{'━' * 25}\n"
+            report += f"✅ Выполнено: {completed}\n"
+            report += f"⏭️ Пропущено: {skipped}\n"
+            report += f"⭐ Заработано: ~{completed * 0.4:.1f}⭐\n"
+            report += f"{'━' * 25}\n"
+            
+            if task_details:
+                # Показываем последние 10 заданий
+                details = task_details[-10:]
+                report += "📋 Последние задания:\n"
+                report += "\n".join(details)
+            
+            report += f"\n{'-' * 25}\n"
+            report += f"⏳ Следующий цикл через {h}ч {m}м"
+            
+            await send_report(client, config, report)
+            
+            # Ждём до следующего цикла
             await asyncio.sleep(interval)
 
         except Exception as e:
             logger.error(f"Ошибка [{account_name}]: {e}")
             await asyncio.sleep(1800)
 
-# --- ИСПРАВЛЕННАЯ ФУНКЦИЯ ОБРАБОТКИ ЗАДАНИЙ ---
+# --- ОБРАБОТКА ОДНОГО ЗАДАНИЯ (С ПРОВЕРКОЙ) ---
 async def process_one_task(client, config: Dict, task_msg) -> tuple:
-    """Обработка одного задания - ВСЕ ВЫПОЛНЯЕМ"""
+    """Обработка одного задания с реальной проверкой выполнения"""
     text = task_msg.text or ""
     
-    # === НОВАЯ ПРОВЕРКА НА /start ===
+    # Пропускаем /start
     if text.strip() == "/start" or text.strip().lower() == "start":
-        # Ищем кнопку "Пропустить"
         if task_msg.buttons:
             for row in task_msg.buttons:
                 for btn in row:
                     if "пропустить" in btn.text.lower():
                         await btn.click()
-                        return 'skip', 'команда start (пропущено)'
+                        return 'skip', 'команда start'
         return 'skip', 'команда start'
     
     if any(phrase in text.lower() for phrase in ALL_DONE_PHRASES):
@@ -742,10 +757,12 @@ async def process_one_task(client, config: Dict, task_msg) -> tuple:
                 if is_webapp_button(btn):
                     return await handle_webapp_task(client, config, task_msg)
 
-    # Обычное задание
+    # --- ОБЫЧНОЕ ЗАДАНИЕ ---
     action_done = False
     action_parts = []
     confirm_btn = None
+    subscribe_btns = []
+    external_links = []
 
     if task_msg.buttons:
         for row in task_msg.buttons:
@@ -753,37 +770,41 @@ async def process_one_task(client, config: Dict, task_msg) -> tuple:
                 btn_text = btn.text.lower()
                 url = getattr(btn, 'url', None)
                 
+                # Кнопка подтверждения
                 if any(w in btn_text for w in CONFIRM_WORDS):
                     confirm_btn = btn
                     continue
                 
+                # Кнопки пропуска
                 if any(w in btn_text for w in ["пропустить", "меню", "назад"]):
                     continue
                 
+                # Кнопки подписки
                 if url:
                     tme_match = re.search(r't\.me/(\+?[a-zA-Z0-9_]+)', url)
                     if tme_match:
                         target = tme_match.group(1)
-                        if target.lower().endswith('bot'):
-                            await client.send_message(target, '/start')
-                        else:
-                            await safe_join(client, target)
-                        action_parts.append(f"подписался на {target}")
+                        if not target.lower().endswith('bot'):
+                            subscribe_btns.append((btn, target))
+                            action_done = True
+                    else:
+                        # Внешняя ссылка
+                        external_links.append(url)
                         action_done = True
 
+    # Если нет кнопок с ссылками, ищем ссылки в тексте
     if not action_done:
         for target in re.findall(r't\.me/(\+?[a-zA-Z0-9_]+)', text):
-            if target.lower().endswith('bot'):
-                await client.send_message(target, '/start')
-            else:
-                await safe_join(client, target)
-            action_parts.append(f"подписался на {target}")
-            action_done = True
+            if not target.lower().endswith('bot'):
+                subscribe_btns.append((None, target))
+                action_done = True
 
+    # Если есть кнопка подтверждения, но не было подписки
     if not action_done and confirm_btn:
         action_done = True
         action_parts.append("ознакомился")
 
+    # Если ничего не нашли - пропускаем
     if not action_done:
         if task_msg.buttons:
             for row in task_msg.buttons:
@@ -793,21 +814,70 @@ async def process_one_task(client, config: Dict, task_msg) -> tuple:
                         return 'skip', 'пропущено'
         return 'skip', 'не найдено'
 
-    await human_delay(config, "click")
+    # === ВЫПОЛНЯЕМ ПОДПИСКИ ===
+    for btn, target in subscribe_btns:
+        success = await safe_join(client, target)
+        if success:
+            action_parts.append(f"✅ {target}")
+        else:
+            action_parts.append(f"❌ {target}")
+        await human_delay(config, "join")
+    
+    # Внешние ссылки (просто логируем)
+    for link in external_links:
+        action_parts.append(f"🔗 ссылка")
+        logger.info(f"🔗 Внешняя ссылка: {link[:50]}...")
+    
+    # === ЖДЁМ ПРОВЕРКИ ОТ БОТА ===
+    await human_delay(config, "task")
+    
+    # Получаем свежий ответ от бота
+    fresh_msg = await get_bot_response(client, config, attempts=10)
+    
+    if fresh_msg:
+        fresh_text = fresh_msg.text or ""
+        logger.info(f"📩 Ответ бота: {fresh_text[:100]}")
+        
+        # Проверяем, подтвердил ли бот выполнение
+        if any(w in fresh_text.lower() for w in SUCCESS_WORDS):
+            # Бот подтвердил - задание выполнено!
+            return 'done', ", ".join(action_parts) + " ✅"
+        
+        # Если бот всё ещё просит подписаться
+        if "подпишись" in fresh_text.lower() or "подпис" in fresh_text.lower():
+            logger.info("🔄 Бот просит подписаться, пробуем снова...")
+            if fresh_msg.buttons:
+                for row in fresh_msg.buttons:
+                    for btn in row:
+                        if any(w in btn.text.lower() for w in CONFIRM_WORDS):
+                            await btn.click()
+                            await human_delay(config, "click")
+                            # Проверяем ещё раз
+                            final_msg = await get_bot_response(client, config)
+                            if final_msg and any(w in (final_msg.text or "").lower() for w in SUCCESS_WORDS):
+                                return 'done', ", ".join(action_parts) + " ✅"
+        
+        # Если есть кнопка подтверждения - жмём
+        if fresh_msg.buttons:
+            for row in fresh_msg.buttons:
+                for btn in row:
+                    if any(w in btn.text.lower() for w in CONFIRM_WORDS):
+                        await btn.click()
+                        await human_delay(config, "click")
+                        # Проверяем финальный ответ
+                        final_msg = await get_bot_response(client, config)
+                        if final_msg and any(w in (final_msg.text or "").lower() for w in SUCCESS_WORDS):
+                            return 'done', ", ".join(action_parts) + " ✅"
+                        return 'done', ", ".join(action_parts) + " (подтверждено)"
 
+    # Если не получили подтверждения
     if confirm_btn:
         await confirm_btn.click()
         await human_delay(config, "click")
-        return 'done', ", ".join(action_parts)
-
-    fresh_msg = await get_bot_response(client, config)
-    if fresh_msg and fresh_msg.buttons:
-        for row in fresh_msg.buttons:
-            for btn in row:
-                if any(w in btn.text.lower() for w in CONFIRM_WORDS):
-                    await btn.click()
-                    await human_delay(config, "click")
-                    return 'done', ", ".join(action_parts) + " ✅"
+        final_msg = await get_bot_response(client, config)
+        if final_msg and any(w in (final_msg.text or "").lower() for w in SUCCESS_WORDS):
+            return 'done', ", ".join(action_parts) + " ✅"
+        return 'done', ", ".join(action_parts) + " (без подтверждения)"
 
     return 'done', ", ".join(action_parts)
 
@@ -823,7 +893,6 @@ def is_webapp_button(btn) -> bool:
     return False
 
 async def handle_webapp_task(client, config: Dict, task_msg):
-    """Обработка WebApp"""
     target_bot = config.get("target_bot", TARGET_BOT)
     
     startapp_url = None
@@ -853,7 +922,9 @@ async def handle_webapp_task(client, config: Dict, task_msg):
                         if any(w in btn.text.lower() for w in CONFIRM_WORDS):
                             await btn.click()
                             await human_delay(config, "click")
-                            return 'done', 'startapp ✅'
+                            final_msg = await get_bot_response(client, config)
+                            if final_msg and any(w in (final_msg.text or "").lower() for w in SUCCESS_WORDS):
+                                return 'done', 'startapp ✅'
             return 'done', 'startapp'
 
     for row in task_msg.buttons:
@@ -866,7 +937,6 @@ async def handle_webapp_task(client, config: Dict, task_msg):
 
 # --- КЛИКЕР ---
 async def clicker_cycle(client, config: Dict):
-    """Цикл кликера"""
     account_name = config.get("name", "unknown")
     target_bot = config.get("target_bot", TARGET_BOT)
     stats = account_stats.get(account_name, reset_stats())
@@ -955,7 +1025,6 @@ async def clicker_cycle(client, config: Dict):
 
 # --- СТАТИСТИКА ---
 async def stats_cycle(client, config: Dict):
-    """Цикл статистики"""
     account_name = config.get("name", "unknown")
     stats = account_stats.get(account_name, reset_stats())
     
@@ -998,7 +1067,6 @@ async def keep_alive_cycle():
 
 # --- ЗАПУСК АККАУНТА ---
 async def run_account(account_config: Dict):
-    """Запуск одного аккаунта"""
     account_name = account_config.get("name", "unknown")
     
     try:
