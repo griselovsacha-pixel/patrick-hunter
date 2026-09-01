@@ -32,6 +32,10 @@ CHANNEL_SOURCE = 'patrickstarsfarm'
 TARGET_USER = 'sanzezzz'
 TIMEZONE_OFFSET = 3  # UTC+3
 
+# Кликер: рандомим количество кликов в день в этом диапазоне (вкл.)
+CLICKER_MIN_PER_DAY = 20
+CLICKER_MAX_PER_DAY = 25
+
 ALL_DONE_PHRASES = [
     "выполнил все задания", "все задания выполнены",
     "приходи через", "новых заданий нет",
@@ -50,13 +54,20 @@ SPONSOR_GATE_HINTS = [
     "для продолжения", "выполни всего", "выполни задани", "чтобы продолжить",
 ]
 
+# Ключевые слова, по которым понимаем, что пост в канале вообще про промокод
+PROMO_KEYWORDS = [
+    "промокод", "промо-код", "промо код", "активац", "promo code", "promo",
+]
+
 IGNORED_WORDS = {
     "html", "http", "https", "main", "patrickstarsrobot", "patrickstarsfarm",
     "profile", "claim", "check", "start", "webapp", "join", "bot", "stars",
     "tgwebapp", "startapp", "go", "app", "link", "channel", "group", "send",
     "ловите", "вводим", "боте", "профиль", "промокод", "дейли", "друзья",
     "патрик", "всем", "привет", "получить", "звезд", "депозит", "игры",
-    "первым", "днем", "лета", "поздравляет",
+    "первым", "днем", "лета", "поздравляет", "патрика", "хантер", "farm",
+    "новый", "новая", "новое", "актив", "код", "активируй", "активируйте",
+    "успей", "успейте", "лимит", "штук", "шт", "первых",
 }
 
 FRUIT_MAP = {
@@ -85,24 +96,19 @@ FRUIT_MAP = {
 }
 
 
-# --- Загрузка аккаунтов из env (TELEGRAM_SESSION, TELEGRAM_SESSION_2, _3, ...) ---
+# --- Загрузка аккаунта из env ---
+# Раньше здесь читалось несколько сессий (TELEGRAM_SESSION, _2, _3, ...) для
+# мультиаккаунт-режима. Оставляем только один — первый/основной TELEGRAM_SESSION.
 def load_account_sessions():
     sessions = []
     primary = os.getenv("TELEGRAM_SESSION")
     if primary:
         sessions.append(("Аккаунт 1", primary))
-    i = 2
-    while True:
-        s = os.getenv(f"TELEGRAM_SESSION_{i}")
-        if not s:
-            break
-        sessions.append((f"Аккаунт {i}", s))
-        i += 1
     return sessions
 
 
 ACCOUNT_SESSIONS = load_account_sessions()
-MULTI_ACCOUNT = len(ACCOUNT_SESSIONS) > 1
+MULTI_ACCOUNT = False  # мультиаккаунт-режим отключён, оставлен один аккаунт
 
 
 # --- Утилиты без привязки к конкретному аккаунту ---
@@ -158,24 +164,50 @@ def parse_next_daily_seconds(text: str) -> int:
 
 
 def find_promo_in_text(text: str):
+    """Ищет промокод в тексте поста канала.
+
+    Расширено по сравнению с прошлой версией: раньше ловился только формат
+    'Активаций: CODE' / 'активаций CODE'. Теперь дополнительно распознаём:
+      - 'Промокод: CODE' / 'промо-код CODE' / 'промо код: CODE'
+      - произвольный формат: если в тексте есть промо-ключевые слова, но
+        ни один из явных шаблонов не сработал — берём первый "похожий на
+        код" токен (капс и/или содержит цифры), которого нет в стоп-листе.
+    """
     if not text:
         return None
     lower_text = text.lower()
-    if not any(w in lower_text for w in ["промо", "активац", "promo"]):
+    if not any(w in lower_text for w in PROMO_KEYWORDS):
         return None
 
-    exact = re.search(r'активаций\s*:\s*([a-zA-Z0-9]{3,20})', text, re.IGNORECASE)
-    if exact:
-        return exact.group(1)
-
     clean_text = text.replace("**", " ").replace("__", " ").replace("`", " ").replace("||", " ")
-    for char in [".", ",", "!", "?", ":", ";", "()", "[]", "»", "«"]:
+    for char in [".", ",", "!", "?", ":", ";", "()", "[]", "»", "«", "—", "–"]:
         clean_text = clean_text.replace(char, " ")
 
-    after_match = re.search(r'активаций\s+(\S+)', clean_text, re.IGNORECASE)
-    if after_match:
-        word = after_match.group(1).strip()
-        if re.match(r'^[a-zA-Z0-9]{3,20}$', word) and word.lower() not in IGNORED_WORDS:
+    # 1) "Активаций: CODE" / "активаций CODE" (старый формат)
+    exact = re.search(r'активаций\s+([a-zA-Z0-9]{3,20})', clean_text, re.IGNORECASE)
+    if exact and exact.group(1).lower() not in IGNORED_WORDS:
+        return exact.group(1)
+
+    # 2) "Промокод CODE" / "промо код CODE" / "промо-код CODE"
+    promo_match = re.search(r'промо[\s\-]?код\w*\s+([a-zA-Z0-9]{3,20})', clean_text, re.IGNORECASE)
+    if promo_match and promo_match.group(1).lower() not in IGNORED_WORDS:
+        return promo_match.group(1)
+
+    # 3) "promo code CODE" / "promo CODE"
+    promo_en_match = re.search(r'promo(?:\s*code)?\s+([a-zA-Z0-9]{3,20})', clean_text, re.IGNORECASE)
+    if promo_en_match and promo_en_match.group(1).lower() not in IGNORED_WORDS:
+        return promo_en_match.group(1)
+
+    # 4) Фолбэк: пост явно про промо, но формат незнакомый — берём первый
+    # токен, похожий на код (ВЕРХНИЙ РЕГИСТР и/или содержит цифру), которого
+    # нет в стоп-листе. Может иногда ошибаться — если словит не то слово,
+    # пришли пример поста, донастроим точнее.
+    for word in re.findall(r'\b([A-Za-z0-9]{4,20})\b', clean_text):
+        wl = word.lower()
+        if wl in IGNORED_WORDS:
+            continue
+        looks_like_code = word.isupper() or bool(re.search(r'\d', word))
+        if looks_like_code:
             return word
 
     return None
@@ -209,21 +241,56 @@ def safe_click_exception_text(e: Exception) -> str:
 
 
 # ======================================================================
-#  PatrickAccount — вся логика фарма для ОДНОГО Telegram-аккаунта.
-#  Каждый аккаунт получает свой TelegramClient, свой лок на переписку
-#  с ботом и свою статистику — аккаунты полностью независимы и не мешают
-#  друг другу (в т.ч. по скорости реакции на промокоды/чеки).
+#  PriorityLock — лок с приоритетом.
+#  Промокоды и чеки должны обрабатываться максимально быстро, даже если
+#  прямо сейчас идёт долгий цикл заданий (30 заданий подряд, каждое с
+#  человеческими задержками). Обычный asyncio.Lock отдаёт лок строго в
+#  порядке очереди (FIFO), поэтому промокод мог реально ждать очень долго.
+#  Здесь high-priority ожидающие (промокоды) встают в очередь ПЕРЕД любыми
+#  low-priority ожидающими (задания/ежедневка/кликер), как только лок
+#  освобождается — то есть максимум ждём завершения ТЕКУЩЕГО шага, а не
+#  всей очереди обычных задач.
+# ======================================================================
+class PriorityLock:
+    def __init__(self):
+        self._locked = False
+        self._high_waiting = 0
+        self._cv = asyncio.Condition()
+
+    @asynccontextmanager
+    async def acquire(self, high_priority: bool = False):
+        async with self._cv:
+            if high_priority:
+                self._high_waiting += 1
+            try:
+                while self._locked or (not high_priority and self._high_waiting > 0):
+                    await self._cv.wait()
+                self._locked = True
+            finally:
+                if high_priority:
+                    self._high_waiting -= 1
+        try:
+            yield
+        finally:
+            async with self._cv:
+                self._locked = False
+                self._cv.notify_all()
+
+
+# ======================================================================
+#  PatrickAccount — вся логика фарма для аккаунта.
 # ======================================================================
 class PatrickAccount:
     def __init__(self, label: str, session_string: str):
         self.label = label
         self.client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
 
-        # Лок на переписку с TARGET_BOT: не даёт разным циклам этого аккаунта
-        # (задания/ежедневка/кликер/промо) одновременно слать и читать сообщения
-        # бота и путать ответы друг друга. Захватывается короткими участками,
-        # чтобы промокод/чек не ждали долго.
-        self.bot_lock = asyncio.Lock()
+        # Приоритетный лок на переписку с TARGET_BOT (см. PriorityLock выше).
+        self.bot_lock = PriorityLock()
+
+        # Очередь входящих сообщений от TARGET_BOT — для событийного (мгновенного)
+        # ожидания ответа вместо опроса истории раз в 1.5с. См. register_bot_dm_handler().
+        self.bot_msg_queue: asyncio.Queue = asyncio.Queue(maxsize=50)
 
         self.activated_promos = set()
         self.promo_in_progress = set()
@@ -240,6 +307,7 @@ class PatrickAccount:
             "tasks_skipped": 0,
             "promos_activated": [],
             "clicker_clicks": 0,
+            "clicker_target": 0,
             "errors": [],
             "stars_earned": 0.0,
         }
@@ -292,7 +360,7 @@ class PatrickAccount:
         except Exception as e:
             logger.error(f"[{self.label}] Ошибка вступления {target}: {e}")
 
-    # --- Ждём свежий ответ от бота ---
+    # --- Ждём свежий ответ от бота (медленный, опросом истории чата) ---
     async def get_bot_response(self, max_age: int = 120, attempts: int = 8):
         for i in range(attempts):
             now = datetime.datetime.now(datetime.timezone.utc)
@@ -305,11 +373,42 @@ class PatrickAccount:
             return msg
         return None
 
+    # --- Ждём свежий ответ от бота (быстрый, событийный) ---
+    # В отличие от get_bot_response() (опрос истории раз в 1.5с — теряли
+    # секунды на каждом шаге промо-активации), здесь мы подписаны на новые
+    # сообщения от бота через register_bot_dm_handler() и просыпаемся сразу,
+    # как только Telegram доставил ответ. `since` отсекает случайные старые/
+    # застрявшие в очереди сообщения — принимаем только то, что реально
+    # пришло ПОСЛЕ нашего действия, так что порядок шагов не может сбиться.
+    async def wait_fresh_bot_response(self, since: datetime.datetime, timeout: float = 10.0):
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeout
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            try:
+                msg = await asyncio.wait_for(self.bot_msg_queue.get(), timeout=remaining)
+            except asyncio.TimeoutError:
+                break
+            if msg.date > since and (msg.text or msg.buttons):
+                return msg
+            # старое/повторное сообщение — игнорируем, ждём дальше
+        # Событие не пришло вовремя (пропущено/лаг) — подстраховка опросом истории
+        return await self.get_bot_response()
+
+    def _drain_bot_queue(self):
+        while not self.bot_msg_queue.empty():
+            try:
+                self.bot_msg_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
     async def _open_bot_unlocked(self):
         """Тело открытия бота БЕЗ захвата bot_lock. Вызывать только если лок уже взят снаружи."""
+        since = datetime.datetime.now(datetime.timezone.utc)
         await self.client.send_message(TARGET_BOT, '/start')
-        await asyncio.sleep(5)
-        msg = await self.get_bot_response()
+        msg = await self.wait_fresh_bot_response(since, timeout=10)
         if not msg:
             return None
 
@@ -320,11 +419,11 @@ class PatrickAccount:
             text_lower = (msg.text or "").lower()
 
             if "проверка" in text_lower:
+                since = datetime.datetime.now(datetime.timezone.utc)
                 solved = await self.solve_captcha_if_needed(msg)
                 if not solved:
                     return None
-                await asyncio.sleep(4)
-                msg = await self.get_bot_response()
+                msg = await self.wait_fresh_bot_response(since, timeout=8)
                 continue
 
             if looks_like_sponsor_gate(msg):
@@ -337,7 +436,7 @@ class PatrickAccount:
 
     async def open_bot(self):
         """Открыть бота как отдельную атомарную операцию (сама берёт лок)."""
-        async with self.bot_lock:
+        async with self.bot_lock.acquire():
             return await self._open_bot_unlocked()
 
     # --- WebApp ---
@@ -479,6 +578,7 @@ class PatrickAccount:
             return msg
 
         await human_delay(4, 8)
+        since = datetime.datetime.now(datetime.timezone.utc)
         try:
             await confirm_btn.click()
             logger.info(f"✅ [{self.label}] Гейт пройден: подписался на {joined} каналов")
@@ -488,8 +588,7 @@ class PatrickAccount:
             await self.send_report(f"⚠️ Гейт спонсоров: ошибка подтверждения: {e}")
             return msg
 
-        await human_delay(2, 4)
-        return await self.get_bot_response()
+        return await self.wait_fresh_bot_response(since, timeout=8)
 
     # --- Сбор ежедневки ---
     async def collect_daily(self) -> int:
@@ -502,7 +601,7 @@ class PatrickAccount:
                     logger.info(f"🔄 [{self.label}] Повторная попытка ежедневки #{attempt+1}")
                     await asyncio.sleep(10)
 
-                async with self.bot_lock:
+                async with self.bot_lock.acquire():
                     msg = await self._open_bot_unlocked()
                     if not msg or not msg.buttons:
                         self.add_error("Ежедневка: бот не ответил")
@@ -828,7 +927,7 @@ class PatrickAccount:
                 logger.info(f"📋 [{self.label}] Запуск цикла заданий...")
                 await self.send_report("📋 Начинаю выполнение заданий...")
 
-                async with self.bot_lock:
+                async with self.bot_lock.acquire():
                     msg = await self._open_bot_unlocked()
                     if not msg or not msg.buttons:
                         await self.send_report("⚠️ Бот не ответил на /start")
@@ -858,7 +957,7 @@ class PatrickAccount:
 
                 for i in range(30):
                     try:
-                        async with self.bot_lock:
+                        async with self.bot_lock.acquire():
                             task_msg = await self.get_bot_response()
                             if not task_msg:
                                 await self.send_report("⚠️ Не получил сообщение от бота")
@@ -943,8 +1042,10 @@ class PatrickAccount:
 
     # --- Промокоды ---
     async def _activate_promo_attempt(self, code: str) -> bool:
-        """Одна попытка активации промокода. Возвращает True при подтверждённом успехе."""
-        async with self.bot_lock:
+        """Одна попытка активации промокода. Возвращает True при подтверждённом успехе.
+        Использует high_priority=True на локе, чтобы не стоять в очереди за
+        циклом заданий/ежедневки/кликера."""
+        async with self.bot_lock.acquire(high_priority=True):
             logger.info(f"🔔 [{self.label}] Активирую промокод: {code}")
 
             msg = await self._open_bot_unlocked()
@@ -953,12 +1054,12 @@ class PatrickAccount:
                 return False
 
             profile_clicked = False
+            since = datetime.datetime.now(datetime.timezone.utc)
             for row in msg.buttons:
                 for btn in row:
                     if any(w in btn.text.lower() for w in ["профил", "profile"]):
                         await btn.click()
                         profile_clicked = True
-                        await human_delay(1, 2)
                         break
                 if profile_clicked:
                     break
@@ -967,18 +1068,20 @@ class PatrickAccount:
                 await self.send_report("⚠️ Промокод: кнопка Профиль не найдена")
                 return False
 
-            msg = await self.get_bot_response()
+            # Событийное ожидание вместо human_delay(1,2)+опрос — экономим секунды
+            # на каждом шаге, это и есть основная причина медленной активации.
+            msg = await self.wait_fresh_bot_response(since, timeout=8)
             if not msg or not msg.buttons:
                 await self.send_report("⚠️ Промокод: нет ответа после Профиля")
                 return False
 
             promo_clicked = False
+            since = datetime.datetime.now(datetime.timezone.utc)
             for row in msg.buttons:
                 for btn in row:
                     if "промо" in btn.text.lower():
                         await btn.click()
                         promo_clicked = True
-                        await human_delay(1, 2)
                         break
                 if promo_clicked:
                     break
@@ -987,10 +1090,15 @@ class PatrickAccount:
                 await self.send_report("⚠️ Не нашёл кнопку промокода")
                 return False
 
-            await self.client.send_message(TARGET_BOT, code)
-            await human_delay(1.5, 2.5)
+            msg2 = await self.wait_fresh_bot_response(since, timeout=8)
+            if not msg2:
+                await self.send_report("⚠️ Промокод: нет ответа после кнопки Промокод")
+                return False
 
-            resp = await self.get_bot_response()
+            since = datetime.datetime.now(datetime.timezone.utc)
+            await self.client.send_message(TARGET_BOT, code)
+
+            resp = await self.wait_fresh_bot_response(since, timeout=8)
             if not resp:
                 await self.send_report(f"⚠️ Промокод `{code}`: нет ответа")
                 return False
@@ -1086,7 +1194,6 @@ class PatrickAccount:
 
     # --- Кликер ---
     async def clicker_cycle(self):
-        CLICKER_TIMES_PER_DAY = 10
         CLICKER_START_HOUR = 8
         CLICKER_END_HOUR = 24
 
@@ -1100,12 +1207,16 @@ class PatrickAccount:
                     await asyncio.sleep(wait_sec)
                     continue
 
+                # Каждый день заново рандомим количество кликов в диапазоне 20-25.
+                times_today = random.randint(CLICKER_MIN_PER_DAY, CLICKER_MAX_PER_DAY)
+                self.stats["clicker_target"] = times_today
+
                 window_sec = (CLICKER_END_HOUR - CLICKER_START_HOUR) * 3600
-                part_sec = window_sec // CLICKER_TIMES_PER_DAY
+                part_sec = window_sec // times_today
                 day_start = now.replace(hour=CLICKER_START_HOUR, minute=0, second=0, microsecond=0)
 
                 click_times = []
-                for i in range(CLICKER_TIMES_PER_DAY):
+                for i in range(times_today):
                     part_start = day_start + datetime.timedelta(seconds=i * part_sec)
                     rand_sec = random.randint(0, int(part_sec * 0.8))
                     click_time = part_start + datetime.timedelta(seconds=rand_sec + random.randint(0, 300))
@@ -1125,7 +1236,7 @@ class PatrickAccount:
                     await asyncio.sleep(wait_sec)
 
                     try:
-                        async with self.bot_lock:
+                        async with self.bot_lock.acquire():
                             await self.client.send_message(TARGET_BOT, '/start')
                             await human_delay(3, 5)
                             msg = await self.get_bot_response()
@@ -1161,7 +1272,7 @@ class PatrickAccount:
                                         resp = await self.get_bot_response()
                                 self.stats["clicker_clicks"] += 1
                                 self.stats["stars_earned"] += 0.1
-                                logger.info(f"🎮 [{self.label}] Клик #{i+1} собран!")
+                                logger.info(f"🎮 [{self.label}] Клик #{i+1}/{times_today} собран!")
 
                     except Exception as e:
                         logger.error(f"[{self.label}] Ошибка клика #{i+1}: {e}")
@@ -1189,13 +1300,14 @@ class PatrickAccount:
             s = self.stats
             promos_str = ", ".join(s["promos_activated"]) if s["promos_activated"] else "нет"
             errors_str = "\n".join(s["errors"][-5:]) if s["errors"] else "нет"
+            clicker_target = s["clicker_target"] or f"{CLICKER_MIN_PER_DAY}-{CLICKER_MAX_PER_DAY}"
 
             report = (
                 f"📊 СТАТИСТИКА ЗА ДЕНЬ\n"
                 f"{'━' * 25}\n"
                 f"📅 Ежедневка: {'✅ собрана' if s['daily_collected'] else '❌ не собрана'}\n"
                 f"📋 Задания: ✅{s['tasks_completed']} | ⏭️{s['tasks_skipped']}\n"
-                f"🎮 Кликер: {s['clicker_clicks']}/10 кликов\n"
+                f"🎮 Кликер: {s['clicker_clicks']}/{clicker_target} кликов\n"
                 f"🔔 Промокоды: {promos_str}\n"
                 f"⭐ Примерно заработано: ~{s['stars_earned']:.1f}⭐\n"
                 f"{'━' * 25}\n"
@@ -1203,6 +1315,25 @@ class PatrickAccount:
             )
             await self.send_report(report)
             self.reset_stats()
+
+    # --- Обработчик личных сообщений от TARGET_BOT (для мгновенного ожидания ответа) ---
+    def register_bot_dm_handler(self):
+        @self.client.on(events.NewMessage(chats=TARGET_BOT))
+        @self.client.on(events.MessageEdited(chats=TARGET_BOT))
+        async def handle_bot_dm(event):
+            try:
+                self.bot_msg_queue.put_nowait(event.message)
+            except asyncio.QueueFull:
+                try:
+                    self.bot_msg_queue.get_nowait()  # выкидываем самое старое
+                except asyncio.QueueEmpty:
+                    pass
+                try:
+                    self.bot_msg_queue.put_nowait(event.message)
+                except asyncio.QueueFull:
+                    pass
+
+        self._bot_dm_handler = handle_bot_dm
 
     # --- Обработчик сообщений канала (промокоды/чеки) ---
     def register_channel_handler(self):
@@ -1215,12 +1346,12 @@ class PatrickAccount:
             # 1. МОМЕНТАЛЬНАЯ ловля чека
             asyncio.create_task(self.try_claim_check(event))
 
-            # 2. Промокод
+            # 2. Промокод (high-priority — обрабатывается вне очереди циклов)
             code = find_promo_in_text(raw)
             if code:
                 logger.info(f"🔔 [{self.label}] Промокод найден: {code}")
                 asyncio.create_task(self.activate_promo(code))
-            elif any(w in raw.lower() for w in ["промо", "активац"]):
+            elif any(w in raw.lower() for w in PROMO_KEYWORDS):
                 await self.send_report(f"🔔 Пост с промо но код не найден:\n{raw[:200]}")
 
         # Храним ссылку, чтобы обработчик не собрал сборщик мусора
@@ -1240,8 +1371,6 @@ class PatrickAccount:
 
 
 # --- Self-ping (анти-засыпание на бесплатном тарифе Render) ---
-# Render.com усыпляет бесплатный веб-сервис после ~15 минут без входящих HTTP-запросов.
-# Общий для всех аккаунтов — достаточно одного пинга процесса.
 async def keep_alive_cycle():
     external_url = os.getenv("RENDER_EXTERNAL_URL")
     if not external_url:
@@ -1270,7 +1399,7 @@ async def lifespan(app: FastAPI):
     global accounts, _background_tasks
 
     if not ACCOUNT_SESSIONS:
-        logger.warning("⚠️ Ни один TELEGRAM_SESSION не задан")
+        logger.warning("⚠️ TELEGRAM_SESSION не задан")
         yield
         return
 
@@ -1279,23 +1408,21 @@ async def lifespan(app: FastAPI):
     for acc in accounts:
         await acc.client.start()
         acc.register_channel_handler()
+        acc.register_bot_dm_handler()
         logger.info(f"✅ [{acc.label}] Telegram client запущен")
         await acc.send_report(
             "🤖 Бот запущен!\n"
             "📅 Ежедневка: по времени бота\n"
             "📋 Задания: каждые ~3 часа\n"
-            "🔔 Промокоды: мониторинг 24/7, реакция мгновенная\n"
+            f"🔔 Промокоды: мониторинг 24/7, реакция мгновенная (приоритетный лок)\n"
             "🎁 Чеки: моментальный перехват\n"
-            "🎮 Кликер: 10 раз в день (8:00-00:00)\n"
+            f"🎮 Кликер: {CLICKER_MIN_PER_DAY}-{CLICKER_MAX_PER_DAY} раз в день (рандом, 8:00-00:00)\n"
             "📊 Статистика: каждый день в 20:00\n"
             "💓 Анти-сон: self-ping каждые ~4 мин"
         )
         _background_tasks.extend(acc.start_cycles())
 
     _background_tasks.append(asyncio.create_task(keep_alive_cycle()))
-
-    if MULTI_ACCOUNT:
-        logger.info(f"🧑‍🤝‍🧑 Мультиаккаунт: {len(accounts)} аккаунтов активны")
 
     yield
 
