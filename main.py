@@ -364,13 +364,17 @@ class PatrickAccount:
     async def get_bot_response(self, max_age: int = 120, attempts: int = 8):
         for i in range(attempts):
             now = datetime.datetime.now(datetime.timezone.utc)
-            async for msg in self.client.iter_messages(TARGET_BOT, limit=5):
-                age = (now - msg.date).total_seconds()
+            async for msg in self.client.iter_messages(TARGET_BOT, limit=8):
+                if msg.out:
+                    continue  # пропускаем наши же исходящие сообщения (/start, код и т.п.)
+                effective_date = msg.edit_date or msg.date  # редактирование не меняет .date
+                age = (now - effective_date).total_seconds()
                 if age < max_age and (msg.text or msg.buttons):
                     return msg
             await asyncio.sleep(1.5)
-        async for msg in self.client.iter_messages(TARGET_BOT, limit=1):
-            return msg
+        async for msg in self.client.iter_messages(TARGET_BOT, limit=5):
+            if not msg.out:
+                return msg
         return None
 
     # --- Ждём свежий ответ от бота (быстрый, событийный) ---
@@ -380,6 +384,9 @@ class PatrickAccount:
     # как только Telegram доставил ответ. `since` отсекает случайные старые/
     # застрявшие в очереди сообщения — принимаем только то, что реально
     # пришло ПОСЛЕ нашего действия, так что порядок шагов не может сбиться.
+    # Важно: бот часто РЕДАКТИРУЕТ одно и то же сообщение вместо отправки
+    # нового — .date при этом не меняется, поэтому сравниваем по
+    # (edit_date or date), а не по голому .date.
     async def wait_fresh_bot_response(self, since: datetime.datetime, timeout: float = 10.0):
         loop = asyncio.get_event_loop()
         deadline = loop.time() + timeout
@@ -391,7 +398,10 @@ class PatrickAccount:
                 msg = await asyncio.wait_for(self.bot_msg_queue.get(), timeout=remaining)
             except asyncio.TimeoutError:
                 break
-            if msg.date > since and (msg.text or msg.buttons):
+            if msg.out:
+                continue  # страховка: наши исходящие в очередь попадать не должны, но на всякий случай
+            effective_date = msg.edit_date or msg.date
+            if effective_date > since and (msg.text or msg.buttons):
                 return msg
             # старое/повторное сообщение — игнорируем, ждём дальше
         # Событие не пришло вовремя (пропущено/лаг) — подстраховка опросом истории
@@ -935,6 +945,7 @@ class PatrickAccount:
                         continue
 
                     task_opened = False
+                    since = datetime.datetime.now(datetime.timezone.utc)
                     for row in msg.buttons:
                         for btn in row:
                             if "задани" in btn.text.lower():
@@ -949,6 +960,10 @@ class PatrickAccount:
                         await asyncio.sleep(10800)
                         continue
 
+                    # Первое задание после открытия раздела — тоже событийно,
+                    # а не через опрос (тот же баг с редактируемыми сообщениями).
+                    first_task_msg = await self.wait_fresh_bot_response(since, timeout=8)
+
                 completed = 0
                 skipped = 0
                 reports = []
@@ -958,7 +973,10 @@ class PatrickAccount:
                 for i in range(30):
                     try:
                         async with self.bot_lock.acquire():
-                            task_msg = await self.get_bot_response()
+                            if i == 0 and first_task_msg is not None:
+                                task_msg = first_task_msg
+                            else:
+                                task_msg = await self.get_bot_response()
                             if not task_msg:
                                 await self.send_report("⚠️ Не получил сообщение от бота")
                                 cycle_broken = True
@@ -1318,8 +1336,11 @@ class PatrickAccount:
 
     # --- Обработчик личных сообщений от TARGET_BOT (для мгновенного ожидания ответа) ---
     def register_bot_dm_handler(self):
-        @self.client.on(events.NewMessage(chats=TARGET_BOT))
-        @self.client.on(events.MessageEdited(chats=TARGET_BOT))
+        # incoming=True — только сообщения ОТ бота; иначе наши же /start и
+        # промокоды тоже попадали в очередь и путали "свежий ответ" с
+        # собственным исходящим сообщением (баг из логов: "Тип не определён: /start").
+        @self.client.on(events.NewMessage(chats=TARGET_BOT, incoming=True))
+        @self.client.on(events.MessageEdited(chats=TARGET_BOT, incoming=True))
         async def handle_bot_dm(event):
             try:
                 self.bot_msg_queue.put_nowait(event.message)
