@@ -1,0 +1,164 @@
+"""
+Утилиты без состояния — чистые функции, никакого Telegram-клиента тут нет.
+Если фиксишь баг в парсинге текста/времени — тебе сюда, а не в account.py.
+"""
+import re
+import random
+import asyncio
+
+from config import PROMO_KEYWORDS, IGNORED_WORDS, CONFIRM_WORDS, SPONSOR_GATE_HINTS, BIO_LINK_HINTS
+from config import TASK_INTERVAL_MIN_SEC, TASK_INTERVAL_MAX_SEC
+
+
+async def human_delay(min_sec: float = 2.0, max_sec: float = 4.0):
+    await asyncio.sleep(random.uniform(min_sec, max_sec))
+
+
+def solve_math(text: str):
+    match = re.search(r'(\d+)\s*([\+\-\*\/])\s*(\d+)\s*=\s*\?', text)
+    if match:
+        a, op, b = int(match.group(1)), match.group(2), int(match.group(3))
+        if op == '+': return a + b
+        if op == '-': return a - b
+        if op == '*': return a * b
+        if op == '/' and b != 0: return a // b
+    expression = re.sub(r'[^\d\+\-\*\/\(\)\s]', '', text)
+    try:
+        return int(eval(expression))
+    except Exception:
+        return None
+
+
+def random_task_interval() -> int:
+    base = random.randint(TASK_INTERVAL_MIN_SEC, TASK_INTERVAL_MAX_SEC)
+    return base + random.randint(0, 300)
+
+
+def is_webapp_button(btn) -> bool:
+    btn_text = btn.text.lower()
+    if any(w in btn_text for w in ["запустить приложение", "открыть приложение", "webapp", "open app"]):
+        return True
+    if type(btn).__name__ in ['KeyboardButtonWebView', 'InlineKeyboardButtonWebApp', 'KeyboardButtonSimpleWebView']:
+        return True
+    url = getattr(btn, 'url', None)
+    if url and any(w in url.lower() for w in ['startapp', 'tgwebapp']):
+        return True
+    return False
+
+
+def parse_next_daily_seconds(text: str) -> int:
+    text_lower = text.lower()
+    hours, minutes = 0, 0
+    h_match = re.search(r'(\d+)\s*час', text_lower)
+    if h_match:
+        hours = int(h_match.group(1))
+    m_match = re.search(r'(\d+)\s*мин', text_lower)
+    if m_match:
+        minutes = int(m_match.group(1))
+    if hours == 0 and minutes == 0:
+        return 24 * 3600
+    return hours * 3600 + minutes * 60 + 300
+
+
+def find_promo_in_text(text: str):
+    """Ищет промокод в тексте поста канала. См. историю правок в комментариях
+    ниже — раньше ловился только формат 'Активаций: CODE'."""
+    if not text:
+        return None
+    lower_text = text.lower()
+    if not any(w in lower_text for w in PROMO_KEYWORDS):
+        return None
+
+    clean_text = text.replace("**", " ").replace("__", " ").replace("`", " ").replace("||", " ")
+    for char in [".", ",", "!", "?", ":", ";", "()", "[]", "»", "«", "—", "–"]:
+        clean_text = clean_text.replace(char, " ")
+
+    exact = re.search(r'активаций\s+([a-zA-Z0-9]{3,20})', clean_text, re.IGNORECASE)
+    if exact and exact.group(1).lower() not in IGNORED_WORDS:
+        return exact.group(1)
+
+    promo_match = re.search(r'промо[\s\-]?код\w*\s+([a-zA-Z0-9]{3,20})', clean_text, re.IGNORECASE)
+    if promo_match and promo_match.group(1).lower() not in IGNORED_WORDS:
+        return promo_match.group(1)
+
+    promo_en_match = re.search(r'promo(?:\s*code)?\s+([a-zA-Z0-9]{3,20})', clean_text, re.IGNORECASE)
+    if promo_en_match and promo_en_match.group(1).lower() not in IGNORED_WORDS:
+        return promo_en_match.group(1)
+
+    # Фолбэк: пост явно про промо, формат незнакомый — берём токен, похожий на код
+    for word in re.findall(r'\b([A-Za-z0-9]{4,20})\b', clean_text):
+        wl = word.lower()
+        if wl in IGNORED_WORDS:
+            continue
+        if word.isupper() or bool(re.search(r'\d', word)):
+            return word
+
+    return None
+
+
+def looks_like_sponsor_gate(msg) -> bool:
+    if not msg or not msg.buttons:
+        return False
+    text = (msg.text or "").lower()
+    if not any(h in text for h in SPONSOR_GATE_HINTS):
+        return False
+
+    has_confirm = False
+    has_link = False
+    for row in msg.buttons:
+        for btn in row:
+            btn_text = btn.text.lower()
+            if any(w in btn_text for w in CONFIRM_WORDS):
+                has_confirm = True
+            if getattr(btn, 'url', None):
+                has_link = True
+
+    return has_confirm and has_link
+
+
+def looks_like_bio_link_popup(text: str) -> bool:
+    """Всплывашка ежедневки вида 'поставь свою личную ссылку в описание,
+    чтобы получать бонус' — см. config.BIO_LINK_HINTS."""
+    lower = (text or "").lower()
+    return any(h in lower for h in BIO_LINK_HINTS)
+
+
+def parse_profile_text(text: str) -> dict:
+    """Парсит экран '✨ Профиль' в словарь с реальными цифрами аккаунта.
+    Формат (см. пример от пользователя):
+        👥 Всего друзей: 87
+        ✅ Активировали бота: 39
+        🔄 Повторные активации: 9
+        💰 Баланс: 9.65 ⭐️
+    Любое поле, которое не нашли, просто отсутствует в результате —
+    вызывающий код обязан на это рассчитывать (см. profile_stats.py).
+    """
+    result = {}
+    if not text:
+        return result
+
+    balance_m = re.search(r'Баланс:\s*([\d]+[.,]?\d*)\s*⭐', text)
+    if balance_m:
+        result['balance'] = float(balance_m.group(1).replace(',', '.'))
+
+    friends_m = re.search(r'Всего друзей:\s*(\d+)', text)
+    if friends_m:
+        result['friends'] = int(friends_m.group(1))
+
+    activated_m = re.search(r'Активировали бота:\s*(\d+)', text)
+    if activated_m:
+        result['activated'] = int(activated_m.group(1))
+
+    reactivations_m = re.search(r'Повторные активации:\s*(\d+)', text)
+    if reactivations_m:
+        result['reactivations'] = int(reactivations_m.group(1))
+
+    id_m = re.search(r'ID:\s*(\d+)', text)
+    if id_m:
+        result['tg_id'] = int(id_m.group(1))
+
+    username_m = re.search(r'Username:\s*@?(\w+)', text)
+    if username_m:
+        result['username'] = username_m.group(1)
+
+    return result
