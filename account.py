@@ -1,0 +1,105 @@
+"""
+PatrickAccount — точка сборки: один Telegram-клиент + все фичи-компоненты.
+Если добавляешь новую фичу — создаёшь новый файл (как daily.py/tasks.py/...)
+и подключаешь её здесь. Сам PatrickAccount не содержит бизнес-логики.
+"""
+import asyncio
+import datetime
+import logging
+
+from telethon import TelegramClient, events
+from telethon.sessions import StringSession
+
+from config import API_ID, API_HASH, TARGET_BOT, TIMEZONE_OFFSET
+from priority_lock import PriorityLock
+from tg_logger import TgLogger
+from profile_stats import ProfileStats
+from bio_manager import BioManager
+from captcha import CaptchaSolver
+from core import BotCore
+from daily import DailyClaimer
+from tasks import TaskRunner
+from promo import PromoHunter
+from clicker import Clicker
+
+logger = logging.getLogger(__name__)
+
+
+class PatrickAccount:
+    def __init__(self, label: str, session_string: str):
+        self.label = label
+        self.client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
+
+        self.bot_lock = PriorityLock()
+        self.tg_logger = TgLogger(self.client, label)
+        self.profile_stats = ProfileStats(self.tg_logger)
+        self.bio_manager = BioManager(self.client, self.tg_logger, label)
+        self.captcha = CaptchaSolver(self.client, self.tg_logger, label)
+        self.core = BotCore(self.client, self.tg_logger, self.captcha, self.bot_lock, label)
+
+        self.daily = DailyClaimer(self.client, self.core, self.tg_logger, self.profile_stats, self.bio_manager, label)
+        self.tasks = TaskRunner(self.client, self.core, self.tg_logger, self.profile_stats, label)
+        self.promo = PromoHunter(self.client, self.core, self.tg_logger, self.profile_stats, label)
+        self.clicker = Clicker(self.client, self.core, self.tg_logger, self.profile_stats, label)
+
+        self._background_tasks = []
+
+    async def start(self):
+        await self.client.start()
+        await self.tg_logger.setup()
+
+        self._register_bot_dm_handler()
+        self.promo.register_channel_handler()
+
+        await self.tg_logger.log(
+            "🤖 Бот запущен!\n"
+            "📅 Ежедневка: по времени бота (+ авто-био при всплывашке)\n"
+            "📋 Задания: каждые ~2ч15м-3ч45м\n"
+            "🔔 Промокоды: мгновенный детект + приоритетный лок + быстрые повторы\n"
+            f"🎮 Кликер: рандом раз в день, окно 8:00-00:00\n"
+            "📊 Статистика: каждый день в 20:00 (реальные данные бота)\n"
+        )
+
+        self._background_tasks = [
+            asyncio.create_task(self.daily.run_forever()),
+            asyncio.create_task(self.tasks.run_forever()),
+            asyncio.create_task(self.clicker.run_forever()),
+            asyncio.create_task(self._stats_cycle()),
+        ]
+
+    def _register_bot_dm_handler(self):
+        """Личные сообщения от TARGET_BOT -> очередь core.bot_msg_queue,
+        чтобы core.wait_fresh() просыпался мгновенно, а не опрашивал историю."""
+        @self.client.on(events.NewMessage(chats=TARGET_BOT, incoming=True))
+        @self.client.on(events.MessageEdited(chats=TARGET_BOT, incoming=True))
+        async def handle_bot_dm(event):
+            try:
+                self.core.bot_msg_queue.put_nowait(event.message)
+            except asyncio.QueueFull:
+                try:
+                    self.core.bot_msg_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+                try:
+                    self.core.bot_msg_queue.put_nowait(event.message)
+                except asyncio.QueueFull:
+                    pass
+
+        self._bot_dm_handler = handle_bot_dm
+
+    async def _stats_cycle(self):
+        while True:
+            now = datetime.datetime.utcnow() + datetime.timedelta(hours=TIMEZONE_OFFSET)
+            target = now.replace(hour=20, minute=0, second=0, microsecond=0)
+            if now >= target:
+                target += datetime.timedelta(days=1)
+            await asyncio.sleep((target - now).total_seconds())
+
+            report = self.profile_stats.daily_report_text(self.clicker.target_today or "20-25")
+            await self.tg_logger.log(report, pin=True)
+            self.profile_stats.reset_daily()
+
+    async def stop(self):
+        for t in self._background_tasks:
+            t.cancel()
+        await self.client.disconnect()
