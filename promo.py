@@ -17,7 +17,7 @@ import logging
 from telethon import events
 
 from config import (
-    CHANNEL_SOURCE, TARGET_BOT, PROMO_KEYWORDS,
+    CHANNEL_SOURCE, TARGET_BOT, PROMO_KEYWORDS, PROMO_REJECT_KEYWORDS,
     PROMO_MAX_ATTEMPTS, PROMO_RETRY_DELAY_RANGE,
 )
 from utils import find_promo_in_text, human_delay
@@ -136,8 +136,7 @@ class PromoHunter:
 
             resp_text = resp.text or ""
 
-            if any(w in resp_text.lower() for w in
-                   ["неверн", "не найден", "истёк", "истек", "уже использован", "invalid", "expired"]):
+            if any(w in resp_text.lower() for w in PROMO_REJECT_KEYWORDS):
                 await self.tg_logger.log(f"Промокод `{code}` отклонён ботом: {resp_text[:150]}", error="отклонён")
                 return True  # терминально — повторять бессмысленно
 
