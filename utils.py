@@ -47,9 +47,34 @@ def is_webapp_button(btn) -> bool:
 
 
 def parse_next_daily_seconds(text: str) -> int:
+    """Парсит время до следующей попытки.
+
+    ВАЖНО (нашли на реальном алерте): текст вида "Бонус можно получить раз
+    в 24 часа! Осталось: 6 ч 51 мин" содержит ДВА числа с "час" — "24 часа"
+    (общее правило) и "6 ч 51 мин" (реально оставшееся время). Простой
+    re.search берёт первое попавшееся совпадение по всему тексту и раньше
+    возвращал 24ч вместо настоящих 6ч51м. Поэтому сначала ищем именно
+    после слова "Осталось" / "останется" / "через", и только если такого
+    маркера нет — фолбэк на первое найденное число с "час"/"ч"."""
     text_lower = text.lower()
+
+    remaining_match = re.search(
+        r'(?:осталось|останется|через)\s*:?\s*(\d+)\s*ч(?:ас(?:ов|а)?)?\s*(?:(\d+)\s*мин)?',
+        text_lower,
+    )
+    if remaining_match:
+        hours = int(remaining_match.group(1))
+        minutes = int(remaining_match.group(2)) if remaining_match.group(2) else 0
+        return hours * 3600 + minutes * 60 + 300
+
+    # Фолбэк на минуты после "осталось", если часов нет вообще ("осталось 40 мин")
+    remaining_min_only = re.search(r'(?:осталось|останется|через)\s*:?\s*(\d+)\s*мин', text_lower)
+    if remaining_min_only:
+        return int(remaining_min_only.group(1)) * 60 + 300
+
+    # Общий фолбэк (старое поведение) — на случай текста без явного маркера
     hours, minutes = 0, 0
-    h_match = re.search(r'(\d+)\s*час', text_lower)
+    h_match = re.search(r'(\d+)\s*ч(?:ас(?:ов|а)?)?\b', text_lower)
     if h_match:
         hours = int(h_match.group(1))
     m_match = re.search(r'(\d+)\s*мин', text_lower)
