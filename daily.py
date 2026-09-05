@@ -89,13 +89,19 @@ class DailyClaimer:
                     alert_text, _ = await self.core.click_button(daily_btn)
 
                     if alert_text:
-                        await self._handle_cooldown_alert(alert_text)
-                        return parse_next_daily_seconds(alert_text)
+                        return await self._handle_alert(alert_text)
 
-                    # Алерта не было — бот в этот раз ответил обычным
-                    # сообщением (либо реально выдал бонус, либо показал
-                    # всплывашку про био именно новым сообщением). Идём по
-                    # старому пути на этот случай.
+                    # Алерта не было (редкий случай, обычно сразу после
+                    # рестарта — Telegram не всегда возвращает алерт на
+                    # первый клик после реконнекта). Раньше здесь стояла
+                    # проверка looks_like_bio_link_popup(text), но она
+                    # оказалась ложной: text в этом фолбэке — это СТАРОЕ
+                    # сообщение (экран Профиля), а не реальный ответ бота,
+                    # и статичная подсказка "поставь ссылку в био" есть на
+                    # этом экране ВСЕГДА. Из-за этого ссылка переставлялась
+                    # заново на каждый такой случай, хотя она уже стояла.
+                    # Теперь просто честно логируем и коротко ретраим —
+                    # без спекулятивных действий по непроверенному тексту.
                     msg = await self.core.wait_fresh(since, timeout=8)
                     if not msg:
                         self.profile_stats.add_error("Ежедневка: нет ответа после нажатия")
@@ -103,13 +109,13 @@ class DailyClaimer:
 
                     text = msg.text or ""
 
-                    # --- Всплывашка "поставь ссылку в описание" (пришла как
-                    # НАСТОЯЩЕЕ новое сообщение, не алерт) ---
                     if looks_like_bio_link_popup(text):
-                        await self.tg_logger.log(f"📎 Всплывашка про ссылку в био:\n{text[:200]}")
-                        await self.bio_manager.ensure_referral_bio()
-                        wait_sec = 15 * 60
-                        await self.tg_logger.log(f"⏳ Ссылка в био проставлена, перепроверю через {wait_sec // 60}м")
+                        await self.tg_logger.log(
+                            f"⚠️ Не получил алерт-ответ на клик ежедневки, "
+                            f"похоже на старый экран Профиля (не действие, просто лог):\n{text[:200]}"
+                        )
+                        wait_sec = 5 * 60
+                        await self.tg_logger.log(f"⏳ Не смог понять ответ, перепроверю через {wait_sec // 60}м")
                         return wait_sec
 
                     if any(w in text.lower() for w in ["уже", "завтра", "получил", "следующ", "приходи", "через"]):
@@ -162,15 +168,31 @@ class DailyClaimer:
             await self.tg_logger.log("Ошибка ежедневки", error=str(e))
             return 3600
 
-    async def _handle_cooldown_alert(self, alert_text: str):
+    async def _handle_alert(self, alert_text: str) -> int:
         """Реальный ответ бота на кнопку ежедневки, полученный как
-        всплывающее окно (см. click_button). Логируем честно, что это —
-        обычный суточный кулдаун, а не проблема с био. На всякий случай
-        всё равно проверяем/выставляем реф. ссылку в био (не повредит,
-        ensure_referral_bio идемпотентен), вдруг бот действительно её не
-        видит и именно поэтому не засчитывает +1⭐ за неё отдельно."""
+        всплывающее окно (см. click_button). Бывает ДВУХ типов, и это
+        разные ситуации:
+
+        1. Кулдаун: "Бонус можно получить раз в 24 часа! Осталось: Xч Yм"
+           — ничего делать не нужно, просто ждём это время.
+        2. Нет ссылки в био: "Сначала поставьте свою личную ссылку в
+           описание или измените настройки конфиденциальности" — вот тут
+           ДЕЙСТВИТЕЛЬНО нужно ставить ссылку (и перепроверять чаще, а не
+           ждать полные сутки).
+
+        Раньше это не различалось: код либо не читал алерт вообще (и путал
+        с ним старый текст экрана Профиля), либо читал, но не проверял,
+        ПРО ЧТО алерт, и одинаково молча ждал 24ч в обоих случаях."""
+        if looks_like_bio_link_popup(alert_text):
+            await self.tg_logger.log(f"📎 Бот просит ссылку в био (реальный алерт):\n{alert_text}")
+            ok = await self.bio_manager.ensure_referral_bio()
+            wait_sec = 10 * 60
+            status = "поставил, перепроверю" if ok else "не смог поставить, попробую снова"
+            await self.tg_logger.log(f"⏳ Ссылку в био {status} через {wait_sec // 60}м")
+            return wait_sec
+
         await self.tg_logger.log(f"⏳ Ежедневка на кулдауне (реальный алерт бота):\n{alert_text}")
-        await self.bio_manager.ensure_referral_bio()
+        return parse_next_daily_seconds(alert_text)
 
     async def _finish_collect(self, resp) -> int:
         resp_text = (resp.text or "") if resp else ""
