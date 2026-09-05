@@ -1,157 +1,189 @@
 """
-DailyClaimer — сбор ежедневного бонуса.
-
-Отдельно обрабатывает всплывашку "поставь свою личную ссылку в описание
-профиля, чтобы получать +1⭐ каждый день": проставляет REFERRAL_LINK в bio
-через BioManager, парсит из текста всплывашки "через сколько можно забрать"
-и планирует следующую попытку ровно на это время.
+Утилиты без состояния — чистые функции, никакого Telegram-клиента тут нет.
+Если фиксишь баг в парсинге текста/времени — тебе сюда, а не в account.py.
 """
+import re
+import random
 import asyncio
-import datetime
-import logging
 
-from utils import human_delay, parse_next_daily_seconds, looks_like_bio_link_popup, solve_math
-from core import utcnow
-
-logger = logging.getLogger(__name__)
+from config import PROMO_KEYWORDS, IGNORED_WORDS, CONFIRM_WORDS, SPONSOR_GATE_HINTS, BIO_LINK_HINTS
+from config import TASK_INTERVAL_MIN_SEC, TASK_INTERVAL_MAX_SEC
 
 
-class DailyClaimer:
-    def __init__(self, client, core, tg_logger, profile_stats, bio_manager, label: str):
-        self.client = client
-        self.core = core
-        self.tg_logger = tg_logger
-        self.profile_stats = profile_stats
-        self.bio_manager = bio_manager
-        self.label = label
+async def human_delay(min_sec: float = 2.0, max_sec: float = 4.0):
+    await asyncio.sleep(random.uniform(min_sec, max_sec))
 
-    async def collect_once(self) -> int:
-        """Возвращает количество секунд до следующей попытки."""
-        try:
-            await self.tg_logger.log("📅 Начинаю сбор ежедневки...")
 
-            for attempt in range(3):
-                if attempt > 0:
-                    await asyncio.sleep(10)
+def solve_math(text: str):
+    match = re.search(r'(\d+)\s*([\+\-\*\/])\s*(\d+)\s*=\s*\?', text)
+    if match:
+        a, op, b = int(match.group(1)), match.group(2), int(match.group(3))
+        if op == '+': return a + b
+        if op == '-': return a - b
+        if op == '*': return a * b
+        if op == '/' and b != 0: return a // b
+    expression = re.sub(r'[^\d\+\-\*\/\(\)\s]', '', text)
+    try:
+        return int(eval(expression))
+    except Exception:
+        return None
 
-                async with self.core.bot_lock.acquire():
-                    msg = await self.core._open_unlocked()
-                    if not msg or not msg.buttons:
-                        self.profile_stats.add_error("Ежедневка: бот не ответил")
-                        continue
 
-                    profile_clicked = False
-                    since = utcnow()
-                    for row in msg.buttons:
-                        for btn in row:
-                            if any(w in btn.text.lower() for w in ["профил", "profile"]):
-                                await btn.click()
-                                profile_clicked = True
-                                break
-                        if profile_clicked:
-                            break
-                    if not profile_clicked:
-                        self.profile_stats.add_error("Ежедневка: профиль не найден")
-                        continue
+def random_task_interval() -> int:
+    base = random.randint(TASK_INTERVAL_MIN_SEC, TASK_INTERVAL_MAX_SEC)
+    return base + random.randint(0, 300)
 
-                    msg = await self.core.wait_fresh(since, timeout=8)
-                    if msg:
-                        await self.profile_stats.update_from_profile_text(msg.text or "")
-                    if not msg or not msg.buttons:
-                        self.profile_stats.add_error("Ежедневка: нет ответа после профиля")
-                        continue
 
-                    daily_clicked = False
-                    since = utcnow()
-                    for row in msg.buttons:
-                        for btn in row:
-                            if any(w in btn.text.lower() for w in ["еже", "daily", "бонус"]):
-                                await btn.click()
-                                daily_clicked = True
-                                break
-                        if daily_clicked:
-                            break
-                    if not daily_clicked:
-                        self.profile_stats.add_error("Ежедневка: кнопка не найдена")
-                        continue
+def is_webapp_button(btn) -> bool:
+    btn_text = btn.text.lower()
+    if any(w in btn_text for w in ["запустить приложение", "открыть приложение", "webapp", "open app"]):
+        return True
+    if type(btn).__name__ in ['KeyboardButtonWebView', 'InlineKeyboardButtonWebApp', 'KeyboardButtonSimpleWebView']:
+        return True
+    url = getattr(btn, 'url', None)
+    if url and any(w in url.lower() for w in ['startapp', 'tgwebapp']):
+        return True
+    return False
 
-                    msg = await self.core.wait_fresh(since, timeout=8)
-                    if not msg:
-                        self.profile_stats.add_error("Ежедневка: нет ответа после нажатия")
-                        continue
 
-                    text = msg.text or ""
+def parse_next_daily_seconds(text: str) -> int:
+    """Парсит время до следующей попытки.
 
-                    # --- Всплывашка "поставь ссылку в описание" ---
-                    if looks_like_bio_link_popup(text):
-                        await self.tg_logger.log(f"📎 Всплывашка про ссылку в био:\n{text[:200]}")
-                        await self.bio_manager.ensure_referral_bio()
-                        wait_sec = parse_next_daily_seconds(text)
-                        h, m = wait_sec // 3600, (wait_sec % 3600) // 60
-                        await self.tg_logger.log(f"⏳ Следующая попытка ежедневки через {h}ч {m}м (после био)")
-                        return wait_sec
+    ВАЖНО (нашли на реальном алерте): текст вида "Бонус можно получить раз
+    в 24 часа! Осталось: 6 ч 51 мин" содержит ДВА числа с "час" — "24 часа"
+    (общее правило) и "6 ч 51 мин" (реально оставшееся время). Простой
+    re.search берёт первое попавшееся совпадение по всему тексту и раньше
+    возвращал 24ч вместо настоящих 6ч51м. Поэтому сначала ищем именно
+    после слова "Осталось" / "останется" / "через", и только если такого
+    маркера нет — фолбэк на первое найденное число с "час"/"ч"."""
+    text_lower = text.lower()
 
-                    if any(w in text.lower() for w in ["уже", "завтра", "получил", "следующ", "приходи", "через"]):
-                        wait_sec = parse_next_daily_seconds(text)
-                        h, m = wait_sec // 3600, (wait_sec % 3600) // 60
-                        await self.tg_logger.log(f"ℹ️ Ежедневка уже забрана, следующая через {h}ч {m}м")
-                        return wait_sec
+    remaining_match = re.search(
+        r'(?:осталось|останется|через)\s*:?\s*(\d+)\s*ч(?:ас(?:ов|а)?)?\s*(?:(\d+)\s*мин)?',
+        text_lower,
+    )
+    if remaining_match:
+        hours = int(remaining_match.group(1))
+        minutes = int(remaining_match.group(2)) if remaining_match.group(2) else 0
+        return hours * 3600 + minutes * 60 + 300
 
-                    if not msg.buttons:
-                        self.profile_stats.add_error(f"Ежедневка: нет кнопок: {text[:80]}")
-                        continue
+    # Фолбэк на минуты после "осталось", если часов нет вообще ("осталось 40 мин")
+    remaining_min_only = re.search(r'(?:осталось|останется|через)\s*:?\s*(\d+)\s*мин', text_lower)
+    if remaining_min_only:
+        return int(remaining_min_only.group(1)) * 60 + 300
 
-                    if "проверка" in text.lower() or any(op in text for op in ["+", "-", "*", "/"]):
-                        since2 = utcnow()
-                        solved = await self.core.captcha.solve_if_needed(msg)
-                        if solved:
-                            resp = await self.core.wait_fresh(since2, timeout=8)
-                            return await self._finish_collect(resp)
-                        else:
-                            self.profile_stats.add_error("Ежедневка: капча не решена")
-                            continue
+    # Общий фолбэк (старое поведение) — на случай текста без явного маркера
+    hours, minutes = 0, 0
+    h_match = re.search(r'(\d+)\s*ч(?:ас(?:ов|а)?)?\b', text_lower)
+    if h_match:
+        hours = int(h_match.group(1))
+    m_match = re.search(r'(\d+)\s*мин', text_lower)
+    if m_match:
+        minutes = int(m_match.group(1))
+    if hours == 0 and minutes == 0:
+        return 24 * 3600
+    return hours * 3600 + minutes * 60 + 300
 
-                    res = solve_math(text)
-                    if res is not None:
-                        clicked_math = False
-                        for row in msg.buttons:
-                            for btn in row:
-                                if btn.text.strip() == str(res):
-                                    since2 = utcnow()
-                                    await btn.click()
-                                    clicked_math = True
-                                    break
-                            if clicked_math:
-                                break
-                        if clicked_math:
-                            resp = await self.core.wait_fresh(since2, timeout=8)
-                            return await self._finish_collect(resp)
-                        self.profile_stats.add_error(f"Ежедневка: ответ {res} не найден")
-                        continue
 
-                    self.profile_stats.add_error(f"Ежедневка: непонятный ответ: {text[:60]}")
-                    continue
+def find_promo_in_text(text: str):
+    """Ищет промокод в тексте поста канала. См. историю правок в комментариях
+    ниже — раньше ловился только формат 'Активаций: CODE'."""
+    if not text:
+        return None
+    lower_text = text.lower()
+    if not any(w in lower_text for w in PROMO_KEYWORDS):
+        return None
 
-            await self.tg_logger.log("Ежедневка: все 3 попытки провалились", error="3 попытки")
-            return 3600
+    clean_text = text.replace("**", " ").replace("__", " ").replace("`", " ").replace("||", " ")
+    for char in [".", ",", "!", "?", ":", ";", "()", "[]", "»", "«", "—", "–"]:
+        clean_text = clean_text.replace(char, " ")
 
-        except Exception as e:
-            logger.error(f"[{self.label}] Ошибка ежедневки: {e}")
-            self.profile_stats.add_error(f"Ежедневка exception: {str(e)[:50]}")
-            await self.tg_logger.log("Ошибка ежедневки", error=str(e))
-            return 3600
+    exact = re.search(r'активаций\s+([a-zA-Z0-9]{3,20})', clean_text, re.IGNORECASE)
+    if exact and exact.group(1).lower() not in IGNORED_WORDS:
+        return exact.group(1)
 
-    async def _finish_collect(self, resp) -> int:
-        resp_text = (resp.text or "") if resp else ""
-        wait_sec = parse_next_daily_seconds(resp_text) if resp_text else 24 * 3600
-        h, m = wait_sec // 3600, (wait_sec % 3600) // 60
-        self.profile_stats.daily_collected_today = True
-        if resp:
-            await self.profile_stats.update_from_profile_text(resp_text)
-        await self.tg_logger.log(f"📅 Ежедневка собрана!\n📩 {resp_text[:150]}\n⏳ Следующая через {h}ч {m}м")
-        return wait_sec
+    promo_match = re.search(r'промо[\s\-]?код\w*\s+([a-zA-Z0-9]{3,20})', clean_text, re.IGNORECASE)
+    if promo_match and promo_match.group(1).lower() not in IGNORED_WORDS:
+        return promo_match.group(1)
 
-    async def run_forever(self):
-        while True:
-            wait_sec = await self.collect_once()
-            await asyncio.sleep(wait_sec)
+    promo_en_match = re.search(r'promo(?:\s*code)?\s+([a-zA-Z0-9]{3,20})', clean_text, re.IGNORECASE)
+    if promo_en_match and promo_en_match.group(1).lower() not in IGNORED_WORDS:
+        return promo_en_match.group(1)
+
+    # Фолбэк: пост явно про промо, формат незнакомый — берём токен, похожий на код
+    for word in re.findall(r'\b([A-Za-z0-9]{4,20})\b', clean_text):
+        wl = word.lower()
+        if wl in IGNORED_WORDS:
+            continue
+        if word.isupper() or bool(re.search(r'\d', word)):
+            return word
+
+    return None
+
+
+def looks_like_sponsor_gate(msg) -> bool:
+    if not msg or not msg.buttons:
+        return False
+    text = (msg.text or "").lower()
+    if not any(h in text for h in SPONSOR_GATE_HINTS):
+        return False
+
+    has_confirm = False
+    has_link = False
+    for row in msg.buttons:
+        for btn in row:
+            btn_text = btn.text.lower()
+            if any(w in btn_text for w in CONFIRM_WORDS):
+                has_confirm = True
+            if getattr(btn, 'url', None):
+                has_link = True
+
+    return has_confirm and has_link
+
+
+def looks_like_bio_link_popup(text: str) -> bool:
+    """Всплывашка ежедневки вида 'поставь свою личную ссылку в описание,
+    чтобы получать бонус' — см. config.BIO_LINK_HINTS."""
+    lower = (text or "").lower()
+    return any(h in lower for h in BIO_LINK_HINTS)
+
+
+def parse_profile_text(text: str) -> dict:
+    """Парсит экран '✨ Профиль' в словарь с реальными цифрами аккаунта.
+    Формат (см. пример от пользователя):
+        👥 Всего друзей: 87
+        ✅ Активировали бота: 39
+        🔄 Повторные активации: 9
+        💰 Баланс: 9.65 ⭐️
+    Любое поле, которое не нашли, просто отсутствует в результате —
+    вызывающий код обязан на это рассчитывать (см. profile_stats.py).
+    """
+    result = {}
+    if not text:
+        return result
+
+    balance_m = re.search(r'Баланс:\s*([\d]+[.,]?\d*)\s*⭐', text)
+    if balance_m:
+        result['balance'] = float(balance_m.group(1).replace(',', '.'))
+
+    friends_m = re.search(r'Всего друзей:\s*(\d+)', text)
+    if friends_m:
+        result['friends'] = int(friends_m.group(1))
+
+    activated_m = re.search(r'Активировали бота:\s*(\d+)', text)
+    if activated_m:
+        result['activated'] = int(activated_m.group(1))
+
+    reactivations_m = re.search(r'Повторные активации:\s*(\d+)', text)
+    if reactivations_m:
+        result['reactivations'] = int(reactivations_m.group(1))
+
+    id_m = re.search(r'ID:\s*(\d+)', text)
+    if id_m:
+        result['tg_id'] = int(id_m.group(1))
+
+    username_m = re.search(r'Username:\s*@?(\w+)', text)
+    if username_m:
+        result['username'] = username_m.group(1)
+
+    return result
