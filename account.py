@@ -10,7 +10,7 @@ import logging
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 
-from config import API_ID, API_HASH, TARGET_BOT, TIMEZONE_OFFSET
+from config import API_ID, API_HASH, TARGET_BOT, TIMEZONE_OFFSET, CHANNEL_SOURCE, CHANNEL_TOUCH_INTERVAL_SEC
 from priority_lock import PriorityLock
 from tg_logger import TgLogger
 from profile_stats import ProfileStats
@@ -46,6 +46,10 @@ class PatrickAccount:
 
     async def start(self):
         await self.client.start()
+        # catch_up() — забрать все обновления, накопившиеся, пока клиент
+        # не был подключён (после рестарта на Render). Без этого события
+        # по каналам могут не прийти вообще, пока их что-то не "разбудит".
+        await self.client.catch_up()
         await self.tg_logger.setup()
 
         self._register_bot_dm_handler()
@@ -65,7 +69,30 @@ class PatrickAccount:
             asyncio.create_task(self.tasks.run_forever()),
             asyncio.create_task(self.clicker.run_forever()),
             asyncio.create_task(self._stats_cycle()),
+            asyncio.create_task(self._channel_touch_cycle()),
         ]
+
+    async def _channel_touch_cycle(self):
+        """КРИТИЧЕСКИ ВАЖНО для скорости промо.
+
+        Обнаружили на практике: промокод в канале детектился только ПОСЛЕ
+        того, как аккаунт вручную открывали в приложении Telegram — то есть
+        реальное время реакции было не "секунды", а "пока кто-то не зайдёт
+        в чат руками". Это известная особенность MTProto: обновления по
+        каналам иногда перестают приходить в реальном времени, пока клиент
+        явно не запросит что-то по этому чату (устаревает internal pts).
+        Простое решение — периодически самим "трогать" канал через лёгкий
+        get_messages(limit=1), это не даёт Telegram "забыть" держать канал
+        живым для нашего соединения."""
+        entity = None
+        while True:
+            try:
+                if entity is None:
+                    entity = await self.client.get_entity(CHANNEL_SOURCE)
+                await self.core.touch_channel(entity)
+            except Exception as e:
+                logger.warning(f"[{self.label}] _channel_touch_cycle: {e}")
+            await asyncio.sleep(CHANNEL_TOUCH_INTERVAL_SEC)
 
     def _register_bot_dm_handler(self):
         """Личные сообщения от TARGET_BOT -> очередь core.bot_msg_queue,
