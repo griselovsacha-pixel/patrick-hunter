@@ -89,42 +89,58 @@ class Clicker:
                 await self.client.send_message(self._target_bot(), '/start')
                 msg = await self.core.wait_fresh(since, timeout=8)
                 if not msg or not msg.buttons:
+                    await self.tg_logger.log(f"🎮 Клик #{index}/{total}: бот не ответил на /start", error="нет ответа")
                     return
 
                 if "проверка" in (msg.text or "").lower():
                     if not await self.core.captcha.solve_if_needed(msg):
+                        await self.tg_logger.log(f"🎮 Клик #{index}/{total}: капча не решена", error="капча")
                         return
                     since = utcnow()
                     msg = await self.core.wait_fresh(since, timeout=6)
 
-                clicker_clicked = False
+                clicker_btn = None
                 if msg and msg.buttons:
                     for row in msg.buttons:
                         for btn in row:
                             if any(w in btn.text.lower() for w in ["кликер", "clicker", "farm", "✨"]):
-                                since = utcnow()
-                                await btn.click()
-                                clicker_clicked = True
+                                clicker_btn = btn
                                 break
-                        if clicker_clicked:
+                        if clicker_btn:
                             break
 
-                if clicker_clicked:
-                    resp = await self.core.wait_fresh(since, timeout=6)
-                    if resp and "проверка" in (resp.text or "").lower():
-                        if await self.core.captcha.solve_if_needed(resp):
-                            since = utcnow()
-                            resp = await self.core.wait_fresh(since, timeout=6)
+                if not clicker_btn:
+                    await self.tg_logger.log(f"🎮 Клик #{index}/{total}: кнопка кликера не найдена", error="нет кнопки")
+                    return
 
-                    self.profile_stats.clicker_clicks_today += 1
-                    logger.info(f"🎮 [{self.label}] Клик #{index}/{total} собран")
+                # ТОТ ЖЕ ФИКС, что и в daily.py: бот может ответить на клик
+                # через всплывающее окно (кулдаун), а не новым сообщением.
+                # Раньше это игнорировалось — клик считался "успешным" по
+                # факту нажатия, даже если реально бот отказал по кулдауну.
+                # Именно это и выглядело как "клики не работают" — они
+                # реально не засчитывались, но код бодро писал bы "собран".
+                alert_text, _ = await self.core.click_button(clicker_btn)
 
-                    if self.profile_stats.clicker_clicks_today % 10 == 0:
-                        await self._refresh_balance()
+                if alert_text:
+                    await self.tg_logger.log(f"🎮 Клик #{index}/{total}: кулдаун — {alert_text}")
+                    return  # не засчитываем клик — бот его не принял
+
+                resp = await self.core.wait_fresh(since, timeout=6)
+                if resp and "проверка" in (resp.text or "").lower():
+                    if await self.core.captcha.solve_if_needed(resp):
+                        since = utcnow()
+                        resp = await self.core.wait_fresh(since, timeout=6)
+
+                self.profile_stats.clicker_clicks_today += 1
+                await self.tg_logger.log(f"🎮 Клик #{index}/{total} собран")
+
+                if self.profile_stats.clicker_clicks_today % 10 == 0:
+                    await self._refresh_balance()
 
         except Exception as e:
             logger.error(f"[{self.label}] Ошибка клика #{index}: {e}")
             self.profile_stats.add_error(f"кликер#{index}: {str(e)[:40]}")
+            await self.tg_logger.log(f"🎮 Клик #{index}/{total}: исключение", error=str(e))
 
     def _target_bot(self):
         return TARGET_BOT
