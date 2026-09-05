@@ -142,7 +142,7 @@ def looks_like_sponsor_gate(msg) -> bool:
 
 
 def looks_like_bio_link_popup(text: str) -> bool:
-    """Всплывашка ежедневки вида 'поставь свою личную ссылку в описание,
+    """Всплывашка ежедневки вида 'поставь свою личную ссылку в описаниерр,
     чтобы получать бонус' — см. config.BIO_LINK_HINTS."""
     lower = (text or "").lower()
     return any(h in lower for h in BIO_LINK_HINTS)
