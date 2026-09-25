@@ -21,6 +21,7 @@ from daily import DailyClaimer
 from tasks import TaskRunner
 from promo import PromoHunter
 from clicker import Clicker
+from supabase_db import SupabaseStore
 
 logger = logging.getLogger(__name__)
 
@@ -28,24 +29,29 @@ logger = logging.getLogger(__name__)
 class PatrickAccount:
     def __init__(self, label: str, session_string: str):
         self.label = label
+        self.db = SupabaseStore(label)
         self.client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
 
         self.bot_lock = PriorityLock()
-        self.tg_logger = TgLogger(self.client, label)
+        self.tg_logger = TgLogger(self.client, label, self.db)
         self.profile_stats = ProfileStats(self.tg_logger)
         self.bio_manager = BioManager(self.client, self.tg_logger, label)
         self.captcha = CaptchaSolver(self.client, self.tg_logger, label)
         self.core = BotCore(self.client, self.tg_logger, self.captcha, self.bot_lock, label)
 
-        self.daily = DailyClaimer(self.client, self.core, self.tg_logger, self.profile_stats, self.bio_manager, label)
-        self.tasks = TaskRunner(self.client, self.core, self.tg_logger, self.profile_stats, label)
-        self.promo = PromoHunter(self.client, self.core, self.tg_logger, self.profile_stats, label)
-        self.clicker = Clicker(self.client, self.core, self.tg_logger, self.profile_stats, label)
+        self.daily = DailyClaimer(self.client, self.core, self.tg_logger, self.profile_stats, self.bio_manager, label, self.db)
+        self.tasks = TaskRunner(self.client, self.core, self.tg_logger, self.profile_stats, label, self.db)
+        self.promo = PromoHunter(self.client, self.core, self.tg_logger, self.profile_stats, label, self.db)
+        self.clicker = Clicker(self.client, self.core, self.tg_logger, self.profile_stats, label, self.db)
 
         self._background_tasks = []
 
     async def start(self):
         await self.client.start()
+        self._register_bot_dm_handler()
+        self.promo.register_channel_handler()
+        await self.db.start()
+        await self.db.set_connected(True)
         # catch_up() — забрать все обновления, накопившиеся, пока клиент
         # не был подключён (после рестарта на Render). Без этого события
         # по каналам могут не прийти вообще, пока их что-то не "разбудит".
@@ -63,9 +69,6 @@ class PatrickAccount:
         # ложный сигнал "нашёл проблему и чиню".
         await self.bio_manager.ensure_referral_bio()
 
-        self._register_bot_dm_handler()
-        self.promo.register_channel_handler()
-
         await self.tg_logger.log(
             "🤖 Бот запущен!\n"
             "📅 Ежедневка: по времени бота (ссылка в био ставится при старте)\n"
@@ -74,6 +77,8 @@ class PatrickAccount:
             f"🎮 Кликер: рандом раз в день, окно 8:00-00:00\n"
             "📊 Статистика: каждый день в 20:00 (реальные данные бота)\n"
         )
+
+        await self.db.log("INFO", "startup", "PatrickAccount started")
 
         self._background_tasks = [
             asyncio.create_task(self.daily.run_forever()),
@@ -140,4 +145,7 @@ class PatrickAccount:
     async def stop(self):
         for t in self._background_tasks:
             t.cancel()
+        await self.db.set_connected(False)
         await self.client.disconnect()
+        await self.db.stop()
+
