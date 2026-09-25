@@ -56,9 +56,17 @@ async def lifespan(app: FastAPI):
         return
 
     accounts = [PatrickAccount(label, session) for label, session in sessions]
-    for acc in accounts:
-        await acc.start()
-        logger.info(f"✅ [{acc.label}] запущен")
+    for index, acc in enumerate(accounts):
+        # Stagger account startup so three Telethon sessions do not all
+        # authenticate/resolve entities at the exact same moment.
+        if index:
+            await asyncio.sleep(index * 2)
+        try:
+            await acc.start()
+            logger.info(f"✅ [{acc.label}] запущен")
+        except Exception as e:
+            # One broken/missing session must not take down the other accounts.
+            logger.exception(f"❌ [{acc.label}] не запущен, остальные продолжают работу: {e}")
 
     _background_tasks.append(asyncio.create_task(keep_alive_cycle()))
 
