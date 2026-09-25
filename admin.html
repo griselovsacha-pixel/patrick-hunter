@@ -1,0 +1,714 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <title>Patrick Hunter — Admin</title>
+
+    <link
+        rel="stylesheet"
+        href="/admin.css"
+    >
+</head>
+
+<body>
+
+<div class="app">
+
+    <!-- SIDEBAR -->
+
+    <aside class="sidebar">
+
+        <div class="logo">
+            <div class="logo-icon">PH</div>
+
+            <div>
+                <strong>Patrick Hunter</strong>
+                <span>Admin Panel</span>
+            </div>
+        </div>
+
+        <nav>
+
+            <button
+                class="nav-item active"
+                data-section="dashboard"
+            >
+                📊
+                <span>Дашборд</span>
+            </button>
+
+            <button
+                class="nav-item"
+                data-section="accounts"
+            >
+                👤
+                <span>Аккаунты</span>
+            </button>
+
+            <button
+                class="nav-item"
+                data-section="activity"
+            >
+                ⚡
+                <span>Активность</span>
+            </button>
+
+            <button
+                class="nav-item"
+                data-section="logs"
+            >
+                📋
+                <span>Логи</span>
+            </button>
+
+        </nav>
+
+        <div class="sidebar-bottom">
+
+            <div class="connection">
+                <span class="status-dot"></span>
+                <span>Supabase подключён</span>
+            </div>
+
+        </div>
+
+    </aside>
+
+
+    <!-- MAIN -->
+
+    <main class="main">
+
+        <!-- HEADER -->
+
+        <header class="header">
+
+            <div>
+
+                <h1 id="page-title">
+                    Дашборд
+                </h1>
+
+                <p id="page-subtitle">
+                    Статистика Patrick Hunter
+                </p>
+
+            </div>
+
+            <div class="header-actions">
+
+                <button
+                    id="refresh-btn"
+                    class="refresh-btn"
+                >
+                    ↻ Обновить
+                </button>
+
+                <span
+                    id="last-update"
+                    class="last-update"
+                >
+                    Загрузка...
+                </span>
+
+            </div>
+
+        </header>
+
+
+        <!-- LOADING -->
+
+        <div
+            id="loading"
+            class="loading"
+        >
+            <div class="spinner"></div>
+            <span>Загрузка статистики...</span>
+        </div>
+
+
+        <!-- ERROR -->
+
+        <div
+            id="error"
+            class="error hidden"
+        >
+            <strong>Ошибка</strong>
+
+            <span id="error-message"></span>
+
+            <button
+                onclick="loadDashboard()"
+            >
+                Повторить
+            </button>
+        </div>
+
+
+        <!-- CONTENT -->
+
+        <div
+            id="content"
+            class="content hidden"
+        >
+
+
+            <!-- ========================================= -->
+            <!-- DASHBOARD -->
+            <!-- ========================================= -->
+
+            <section
+                id="section-dashboard"
+                class="section active"
+            >
+
+                <!-- KPI -->
+
+                <div class="stats-grid">
+
+                    <div class="stat-card">
+
+                        <div class="stat-icon purple">
+                            ⭐
+                        </div>
+
+                        <div>
+                            <span class="stat-label">
+                                Всего Stars
+                            </span>
+
+                            <strong
+                                id="total-stars"
+                                class="stat-value"
+                            >
+                                0
+                            </strong>
+                        </div>
+
+                    </div>
+
+
+                    <div class="stat-card">
+
+                        <div class="stat-icon blue">
+                            🖱️
+                        </div>
+
+                        <div>
+                            <span class="stat-label">
+                                Кликов
+                            </span>
+
+                            <strong
+                                id="total-clicks"
+                                class="stat-value"
+                            >
+                                0
+                            </strong>
+                        </div>
+
+                    </div>
+
+
+                    <div class="stat-card">
+
+                        <div class="stat-icon green">
+                            ✅
+                        </div>
+
+                        <div>
+                            <span class="stat-label">
+                                Заданий
+                            </span>
+
+                            <strong
+                                id="total-tasks"
+                                class="stat-value"
+                            >
+                                0
+                            </strong>
+                        </div>
+
+                    </div>
+
+
+                    <div class="stat-card">
+
+                        <div class="stat-icon orange">
+                            🎁
+                        </div>
+
+                        <div>
+                            <span class="stat-label">
+                                Daily Bonus
+                            </span>
+
+                            <strong
+                                id="total-daily"
+                                class="stat-value"
+                            >
+                                0
+                            </strong>
+                        </div>
+
+                    </div>
+
+
+                    <div class="stat-card">
+
+                        <div class="stat-icon pink">
+                            🎟️
+                        </div>
+
+                        <div>
+                            <span class="stat-label">
+                                Промокодов найдено
+                            </span>
+
+                            <strong
+                                id="total-promos-found"
+                                class="stat-value"
+                            >
+                                0
+                            </strong>
+                        </div>
+
+                    </div>
+
+
+                    <div class="stat-card">
+
+                        <div class="stat-icon cyan">
+                            🚀
+                        </div>
+
+                        <div>
+                            <span class="stat-label">
+                                Промокодов активировано
+                            </span>
+
+                            <strong
+                                id="total-promos-activated"
+                                class="stat-value"
+                            >
+                                0
+                            </strong>
+                        </div>
+
+                    </div>
+
+                </div>
+
+
+                <!-- CHARTS -->
+
+                <div class="charts-grid">
+
+                    <div class="panel large">
+
+                        <div class="panel-header">
+
+                            <div>
+                                <h2>
+                                    Активность
+                                </h2>
+
+                                <span>
+                                    Динамика по дням
+                                </span>
+                            </div>
+
+                        </div>
+
+                        <div class="chart-container">
+
+                            <canvas
+                                id="activity-chart"
+                            ></canvas>
+
+                        </div>
+
+                    </div>
+
+
+                    <div class="panel">
+
+                        <div class="panel-header">
+
+                            <div>
+                                <h2>
+                                    Stars
+                                </h2>
+
+                                <span>
+                                    Источники дохода
+                                </span>
+                            </div>
+
+                        </div>
+
+                        <div class="chart-container">
+
+                            <canvas
+                                id="stars-chart"
+                            ></canvas>
+
+                        </div>
+
+                    </div>
+
+                </div>
+
+
+                <!-- QUICK INFO -->
+
+                <div class="two-columns">
+
+                    <div class="panel">
+
+                        <div class="panel-header">
+
+                            <div>
+                                <h2>
+                                    Аккаунты
+                                </h2>
+
+                                <span>
+                                    Состояние Telegram аккаунтов
+                                </span>
+                            </div>
+
+                        </div>
+
+                        <div
+                            id="accounts-preview"
+                            class="account-list"
+                        ></div>
+
+                    </div>
+
+
+                    <div class="panel">
+
+                        <div class="panel-header">
+
+                            <div>
+                                <h2>
+                                    Последние события
+                                </h2>
+
+                                <span>
+                                    Активность бота
+                                </span>
+                            </div>
+
+                        </div>
+
+                        <div
+                            id="events-preview"
+                            class="event-list"
+                        ></div>
+
+                    </div>
+
+                </div>
+
+            </section>
+
+
+            <!-- ========================================= -->
+            <!-- ACCOUNTS -->
+            <!-- ========================================= -->
+
+            <section
+                id="section-accounts"
+                class="section"
+            >
+
+                <div class="panel">
+
+                    <div class="panel-header">
+
+                        <div>
+                            <h2>
+                                Telegram аккаунты
+                            </h2>
+
+                            <span>
+                                Текущий статус подключений
+                            </span>
+                        </div>
+
+                    </div>
+
+                    <div class="table-wrapper">
+
+                        <table>
+
+                            <thead>
+
+                                <tr>
+                                    <th>Аккаунт</th>
+                                    <th>Имя</th>
+                                    <th>Статус</th>
+                                    <th>Последнее подключение</th>
+                                    <th>Обновлён</th>
+                                </tr>
+
+                            </thead>
+
+                            <tbody
+                                id="accounts-table"
+                            ></tbody>
+
+                        </table>
+
+                    </div>
+
+                </div>
+
+            </section>
+
+
+            <!-- ========================================= -->
+            <!-- ACTIVITY -->
+            <!-- ========================================= -->
+
+            <section
+                id="section-activity"
+                class="section"
+            >
+
+                <div class="stats-grid">
+
+                    <div class="stat-card">
+
+                        <div class="stat-icon blue">
+                            🖱️
+                        </div>
+
+                        <div>
+                            <span class="stat-label">
+                                Кликов
+                            </span>
+
+                            <strong
+                                id="activity-clicks"
+                                class="stat-value"
+                            >
+                                0
+                            </strong>
+                        </div>
+
+                    </div>
+
+
+                    <div class="stat-card">
+
+                        <div class="stat-icon green">
+                            ✅
+                        </div>
+
+                        <div>
+                            <span class="stat-label">
+                                Заданий
+                            </span>
+
+                            <strong
+                                id="activity-tasks"
+                                class="stat-value"
+                            >
+                                0
+                            </strong>
+                        </div>
+
+                    </div>
+
+
+                    <div class="stat-card">
+
+                        <div class="stat-icon cyan">
+                            📱
+                        </div>
+
+                        <div>
+                            <span class="stat-label">
+                                Mini Apps
+                            </span>
+
+                            <strong
+                                id="activity-mini-apps"
+                                class="stat-value"
+                            >
+                                0
+                            </strong>
+                        </div>
+
+                    </div>
+
+
+                    <div class="stat-card">
+
+                        <div class="stat-icon orange">
+                            🎁
+                        </div>
+
+                        <div>
+                            <span class="stat-label">
+                                Daily Bonus
+                            </span>
+
+                            <strong
+                                id="activity-daily"
+                                class="stat-value"
+                            >
+                                0
+                            </strong>
+                        </div>
+
+                    </div>
+
+                </div>
+
+
+                <div class="panel">
+
+                    <div class="panel-header">
+
+                        <div>
+                            <h2>
+                                Последние клики
+                            </h2>
+
+                            <span>
+                                Последние 200 событий
+                            </span>
+                        </div>
+
+                    </div>
+
+                    <div class="table-wrapper">
+
+                        <table>
+
+                            <thead>
+
+                                <tr>
+                                    <th>Аккаунт</th>
+                                    <th>Время</th>
+                                    <th>Stars</th>
+                                </tr>
+
+                            </thead>
+
+                            <tbody
+                                id="clicks-table"
+                            ></tbody>
+
+                        </table>
+
+                    </div>
+
+                </div>
+
+
+                <div class="panel">
+
+                    <div class="panel-header">
+
+                        <div>
+                            <h2>
+                                Выполненные задания
+                            </h2>
+
+                        </div>
+
+                    </div>
+
+                    <div class="table-wrapper">
+
+                        <table>
+
+                            <thead>
+
+                                <tr>
+                                    <th>Аккаунт</th>
+                                    <th>Тип</th>
+                                    <th>Время</th>
+                                    <th>Stars</th>
+                                </tr>
+
+                            </thead>
+
+                            <tbody
+                                id="tasks-table"
+                            ></tbody>
+
+                        </table>
+
+                    </div>
+
+                </div>
+
+            </section>
+
+
+            <!-- ========================================= -->
+            <!-- LOGS -->
+            <!-- ========================================= -->
+
+            <section
+                id="section-logs"
+                class="section"
+            >
+
+                <div class="panel">
+
+                    <div class="panel-header">
+
+                        <div>
+                            <h2>
+                                Логи
+                            </h2>
+
+                            <span>
+                                Последние события приложения
+                            </span>
+                        </div>
+
+                    </div>
+
+                    <div
+                        id="logs-container"
+                        class="logs-container"
+                    ></div>
+
+                </div>
+
+            </section>
+
+        </div>
+
+    </main>
+
+</div>
+
+
+<!-- CHART.JS -->
+
+<script
+    src="https://cdn.jsdelivr.net/npm/chart.js"
+></script>
+
+
+<!-- ADMIN JS -->
+
+<script src="/admin.js"></script>
+
+</body>
+</html>
