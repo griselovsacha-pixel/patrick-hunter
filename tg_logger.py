@@ -22,9 +22,10 @@ def _now_str() -> str:
 
 
 class TgLogger:
-    def __init__(self, client, label: str):
+    def __init__(self, client, label: str, db=None):
         self.client = client
         self.label = label
+        self.db = db
         self.group_entity = None  # резолвится в setup()
 
     async def setup(self):
@@ -50,6 +51,8 @@ class TgLogger:
         status = f"❌ ОШИБКА: {error}" if error else "✅ OK"
         line = f"🕐 {_now_str()} [{self.label}]\n{action}\n{status}"
         (logger.error if error else logger.info)(f"[{self.label}] {action} | {status}")
+        if self.db:
+            await self.db.log("ERROR" if error else "INFO", "telegram", action, error=error)
 
         if not self.group_entity:
             return
