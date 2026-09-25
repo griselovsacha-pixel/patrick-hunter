@@ -19,12 +19,13 @@ logger = logging.getLogger(__name__)
 
 
 class Clicker:
-    def __init__(self, client, core, tg_logger, profile_stats, label: str):
+    def __init__(self, client, core, tg_logger, profile_stats, label: str, db=None):
         self.client = client
         self.core = core
         self.tg_logger = tg_logger
         self.profile_stats = profile_stats
         self.label = label
+        self.db = db
         self.target_today = 0
 
     def _now_local(self):
@@ -132,6 +133,8 @@ class Clicker:
                         resp = await self.core.wait_fresh(since, timeout=6)
 
                 self.profile_stats.clicker_clicks_today += 1
+                if self.db:
+                    await self.db.event("click", stars=0.10)
                 await self.tg_logger.log(f"🎮 Клик #{index}/{total} собран")
 
                 if self.profile_stats.clicker_clicks_today % 10 == 0:
