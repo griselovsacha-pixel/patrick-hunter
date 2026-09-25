@@ -16,12 +16,13 @@ logger = logging.getLogger(__name__)
 
 
 class TaskRunner:
-    def __init__(self, client, core, tg_logger, profile_stats, label: str):
+    def __init__(self, client, core, tg_logger, profile_stats, label: str, db=None):
         self.client = client
         self.core = core
         self.tg_logger = tg_logger
         self.profile_stats = profile_stats
         self.label = label
+        self.db = db
 
     async def process_one_task(self, task_msg) -> tuple:
         text = task_msg.text or ""
@@ -60,6 +61,8 @@ class TaskRunner:
                 confirmed = await self._click_confirm_if_present(fresh_msg)
                 confirm_note = " и подтверждено" if confirmed else ""
                 await self.tg_logger.log(f"🚀 Приложение запущено{confirm_note}!\n📄 {text[:80]}")
+                if self.db:
+                    await self.db.event("mini_app", stars=0.0, task_type="mini_app")
                 return 'done', f'startapp ({startapp_url[:50]})'
 
         for row in task_msg.buttons:
@@ -284,6 +287,8 @@ class TaskRunner:
                     elif result == 'done':
                         completed += 1
                         await self.tg_logger.log(f"✅ Задание #{completed} выполнено!\n📌 {desc}")
+                        if self.db:
+                            await self.db.event("task", stars=0.4, task_type="task")
                         await human_delay(4, 9)
                     elif result == 'skip':
                         skipped += 1
