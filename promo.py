@@ -28,12 +28,13 @@ logger = logging.getLogger(__name__)
 
 
 class PromoHunter:
-    def __init__(self, client, core, tg_logger, profile_stats, label: str):
+    def __init__(self, client, core, tg_logger, profile_stats, label: str, db=None):
         self.client = client
         self.core = core
         self.tg_logger = tg_logger
         self.profile_stats = profile_stats
         self.label = label
+        self.db = db
 
         self.activated_promos = set()
         self.promo_in_progress = set()
@@ -49,6 +50,8 @@ class PromoHunter:
             code = find_promo_in_text(raw)
             if code:
                 logger.info(f"🔔 [{self.label}] Промокод найден: {code}")
+                if self.db:
+                    asyncio.create_task(self.db.event("promo_found", promo_code=code))
                 asyncio.create_task(self.activate(code))
             elif any(w in raw.lower() for w in PROMO_KEYWORDS):
                 await self.tg_logger.log(f"Пост с промо, но код не распознан: {raw[:200]}", error="код не найден")
@@ -78,11 +81,15 @@ class PromoHunter:
             if success:
                 self.activated_promos.add(code.lower())
                 self.profile_stats.promos_activated_today.append(code)
+                if self.db:
+                    await self.db.event("promo_activated", promo_code=code, stars=2.0)
                 if len(self.activated_promos) > 50:
                     self.activated_promos = set(list(self.activated_promos)[-20:])
             else:
                 self.profile_stats.add_error(f"промо {code}: все попытки неудачны")
                 await self.tg_logger.log(f"Промокод `{code}`: все {PROMO_MAX_ATTEMPTS} попыток неудачны", error="исчерпаны попытки")
+                if self.db:
+                    await self.db.event("promo_failed", promo_code=code, error_reason="all attempts failed")
         finally:
             self.promo_in_progress.discard(code.lower())
 
