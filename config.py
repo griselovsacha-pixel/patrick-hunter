@@ -5,8 +5,8 @@
 import os
 
 # --- Telegram API ---
-API_ID = 31206776
-API_HASH = '7ca69453a014d6a87d67afe4d9df8284'
+API_ID = int(os.getenv("TELEGRAM_API_ID", "31206776"))
+API_HASH = os.getenv("TELEGRAM_API_HASH", "7ca69453a014d6a87d67afe4d9df8284")
 
 # --- Целевые сущности ---
 TARGET_BOT = 'patrickstarsrobot'
@@ -25,7 +25,7 @@ TIMEZONE_OFFSET = 3  # UTC+3
 # Как часто "трогать" канал с промокодами лёгким запросом, чтобы Telegram
 # не переставал присылать обновления по нему в реальном времени (см.
 # комментарий у _channel_touch_cycle в account.py).
-CHANNEL_TOUCH_INTERVAL_SEC = 60
+CHANNEL_TOUCH_INTERVAL_SEC = int(os.getenv("CHANNEL_TOUCH_INTERVAL_SEC", "20"))
 
 # --- Кликер: рандомим количество кликов в день в этом диапазоне (вкл.) ---
 CLICKER_MIN_PER_DAY = 27
@@ -133,9 +133,20 @@ FRUIT_MAP = {
 
 
 def load_account_sessions():
-    """Только один аккаунт (основной TELEGRAM_SESSION)."""
+    """Load up to three accounts; missing sessions are skipped safely.
+
+    TELEGRAM_SESSION is kept as a backwards-compatible alias for account 1.
+    """
     sessions = []
-    primary = os.getenv("TELEGRAM_SESSION")
-    if primary:
-        sessions.append(("Аккаунт 1", primary))
+    env_names = ("TELEGRAM_SESSION_1", "TELEGRAM_SESSION_2", "TELEGRAM_SESSION_3")
+    labels = ("Аккаунт 1", "Аккаунт 2", "Аккаунт 3")
+    for label, env_name in zip(labels, env_names):
+        value = os.getenv(env_name)
+        if not value and env_name == "TELEGRAM_SESSION_1":
+            value = os.getenv("TELEGRAM_SESSION")
+        if value:
+            sessions.append((label, value))
+        else:
+            logging_msg = f"⚠️ {label}: {env_name} не задан — аккаунт пропущен"
+            print(logging_msg)
     return sessions
