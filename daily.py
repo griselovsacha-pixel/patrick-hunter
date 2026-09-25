@@ -17,13 +17,14 @@ logger = logging.getLogger(__name__)
 
 
 class DailyClaimer:
-    def __init__(self, client, core, tg_logger, profile_stats, bio_manager, label: str):
+    def __init__(self, client, core, tg_logger, profile_stats, bio_manager, label: str, db=None):
         self.client = client
         self.core = core
         self.tg_logger = tg_logger
         self.profile_stats = profile_stats
         self.bio_manager = bio_manager
         self.label = label
+        self.db = db
 
     async def collect_once(self) -> int:
         """Возвращает количество секунд до следующей попытки."""
@@ -199,6 +200,8 @@ class DailyClaimer:
         wait_sec = parse_next_daily_seconds(resp_text) if resp_text else 24 * 3600
         h, m = wait_sec // 3600, (wait_sec % 3600) // 60
         self.profile_stats.daily_collected_today = True
+        if self.db:
+            await self.db.event("daily_bonus", stars=1.0)
         if resp:
             await self.profile_stats.update_from_profile_text(resp_text)
         await self.tg_logger.log(f"📅 Ежедневка собрана!\n📩 {resp_text[:150]}\n⏳ Следующая через {h}ч {m}м")
@@ -208,3 +211,4 @@ class DailyClaimer:
         while True:
             wait_sec = await self.collect_once()
             await asyncio.sleep(wait_sec)
+
