@@ -158,6 +158,37 @@ function renderTotals() {
     $("total-promos-activated").textContent =
         formatNumber(totals.promos_activated);
 
+    // BALANCE — данные приходят из /api/admin/overview
+    const balance = dashboardData.balance || {};
+
+    if ($("event-earnings")) {
+        $("event-earnings").textContent =
+            `${formatStars(
+                balance.event_earnings ??
+                totals.stars ??
+                0
+            )} ⭐`;
+    }
+
+    if ($("real-balance")) {
+        $("real-balance").textContent =
+            `${formatStars(
+                balance.real_balance ??
+                dashboardData.real_balance ??
+                0
+            )} ⭐`;
+    }
+
+    if ($("balance-delta")) {
+        const delta =
+            balance.today_delta ??
+            dashboardData.balance_delta_today ??
+            0;
+
+        $("balance-delta").textContent =
+            `${Number(delta || 0) >= 0 ? "+" : ""}${formatStars(delta)} ⭐`;
+    }
+
     $("activity-clicks").textContent =
         formatNumber(totals.clicks);
 
