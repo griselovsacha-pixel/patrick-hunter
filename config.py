@@ -1,3 +1,4 @@
+
 """
 Вся конфигурация проекта в одном месте.
 Меняешь ID/ссылки/диапазоны — лезешь только сюда, остальные файлы не трогаешь.
@@ -18,7 +19,19 @@ LOG_GROUP_INVITE = 'https://t.me/+8s4mIhpGhO80MGIy'
 
 # Наша реферальная ссылка — вставляется в описание профиля, когда бот просит
 # это сделать для ежедневного бонуса.
-REFERRAL_LINK = 'https://t.me/patrickstarsrobot?start=880628963'
+REFERRAL_LINK = 'https://t.me/patrickstarsrobot?start=880628963'  # запасной вариант для аккаунтов без своей ссылки
+# Личная реф. ссылка КАЖДОГО аккаунта (ставится в описание профиля). Можно переопределить
+# переменной окружения REFERRAL_LINK_<номер>, например REFERRAL_LINK_3.
+REFERRAL_LINKS = {
+    1: 'https://t.me/patrickstarsrobot?start=880628963',
+    2: 'https://t.me/patrickstarsrobot?start=7880707793',
+}
+
+
+def referral_link_for(account_number: int) -> str:
+    return (os.getenv(f"REFERRAL_LINK_{account_number}")
+            or REFERRAL_LINKS.get(account_number)
+            or REFERRAL_LINK)
 
 TIMEZONE_OFFSET = 3  # UTC+3
 
@@ -126,6 +139,12 @@ BIO_LINK_HINTS = [
     "поставьте свою личную ссылку", "настройки конфиденциальности",
 ]
 
+# Задания, требующие денег/депозита, не выполняем — пропускаем кнопкой «Пропустить».
+SKIP_TASK_WORDS = [
+    "депозит", "пополни", "пополнен", "оплат", "купи ", "покупк", "заплат", "донат",
+    "deposit", "top up", "top-up",
+]
+
 ALL_DONE_PHRASES = [
     "выполнил все задания", "все задания выполнены",
     "приходи через", "новых заданий нет",
@@ -172,19 +191,33 @@ FRUIT_MAP = {
 def load_account_sessions():
     """Загружает до MAX_ACCOUNTS аккаунтов: TELEGRAM_SESSION_1, _2, ...
 
-    TELEGRAM_SESSION — старый алиас для аккаунта 1. Пустые слоты пропускаются.
+    Старая переменная TELEGRAM_SESSION (без номера) раньше работала только как
+    алиас для аккаунта 1 и молча игнорировалась, если задан TELEGRAM_SESSION_1.
+    Теперь, если её значение отличается от остальных, она подхватывается как
+    отдельный аккаунт в первом свободном слоте (лучше всё же переименовать её
+    в TELEGRAM_SESSION_2).
     """
-    sessions = []
+    slots = {}
     for n in range(1, MAX_ACCOUNTS + 1):
-        env_name = f"TELEGRAM_SESSION_{n}"
-        value = os.getenv(env_name)
-        if not value and n == 1:
-            value = os.getenv("TELEGRAM_SESSION")
+        value = (os.getenv(f"TELEGRAM_SESSION_{n}") or "").strip()
         if value:
-            sessions.append((f"Аккаунт {n}", value.strip()))
-        elif n <= 3:
-            print(f"⚠️ Аккаунт {n}: {env_name} не задан — пропущен")
-    return sessions
+            slots[n] = value
+
+    legacy = (os.getenv("TELEGRAM_SESSION") or "").strip()
+    if legacy and legacy not in slots.values():
+        free = next((n for n in range(1, MAX_ACCOUNTS + 1) if n not in slots), None)
+        if free is None:
+            print("⚠️ TELEGRAM_SESSION задана, но все слоты аккаунтов заняты — пропущена")
+        else:
+            slots[free] = legacy
+            print(f"ℹ️ TELEGRAM_SESSION подхвачена как «Аккаунт {free}» "
+                  f"(лучше переименуй переменную в TELEGRAM_SESSION_{free})")
+
+    for n in range(1, 4):
+        if n not in slots:
+            print(f"⚠️ Аккаунт {n}: TELEGRAM_SESSION_{n} не задан — пропущен")
+    return [(f"Аккаунт {n}", slots[n]) for n in sorted(slots)]
+
 
 # --- Мини-аппы (miniapp.py) ---
 # MINIAPP_REAL_OPEN=0 — вернуть старое поведение (StartBotRequest + пауза).
