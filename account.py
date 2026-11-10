@@ -1,11 +1,16 @@
 """
 PatrickAccount — точка сборки одного Telegram-клиента.
+
+Каждый аккаунт полностью самостоятелен: свой TelegramClient, свой bot_lock,
+свой наблюдатель за каналом, свои охотники за промо/чеками, своя запись в
+Supabase. Общего состояния между аккаунтами нет, кроме Hub (он только
+пересылает «увидел код» соседям и ничего не блокирует).
 """
 import asyncio
 import datetime
 import logging
 
-from telethon import TelegramClient, events
+from telethon import TelegramClient
 from telethon.sessions import StringSession
 
 from config import (
@@ -13,31 +18,33 @@ from config import (
     API_HASH,
     TARGET_BOT,
     TIMEZONE_OFFSET,
-    CHANNEL_SOURCE,
-    CHANNEL_TOUCH_INTERVAL_SEC,
+    WATCH_CHANNELS,
+    TASK_START_STAGGER_SEC,
 )
 from priority_lock import PriorityLock
 from tg_logger import TgLogger
 from profile_stats import ProfileStats
 from bio_manager import BioManager
 from captcha import CaptchaSolver
-from core import BotCore
+from core import BotCore, utcnow
 from daily import DailyClaimer
 from tasks import TaskRunner
 from promo import PromoHunter
+from checks import CheckHunter
+from watcher import ChannelWatcher
 from clicker import Clicker
 from supabase_db import SupabaseStore
+from utils import find_button
+from telethon import events
 
 logger = logging.getLogger(__name__)
 
 
 class PatrickAccount:
-    def __init__(
-        self,
-        label: str,
-        session_string: str,
-    ):
+    def __init__(self, label: str, session_string: str, index: int = 0):
         self.label = label
+        self.index = index
+        self.ready = False  # True, когда клиент поднят и ловля промо/чеков запущена
         self.db = SupabaseStore(label)
 
         self.client = TelegramClient(
@@ -47,283 +54,185 @@ class PatrickAccount:
         )
 
         self.bot_lock = PriorityLock()
-
-        self.tg_logger = TgLogger(
-            self.client,
-            label,
-            self.db,
-        )
-
-        self.profile_stats = ProfileStats(
-            self.tg_logger,
-            self.db,
-        )
-
-        self.bio_manager = BioManager(
-            self.client,
-            self.tg_logger,
-            label,
-        )
-
-        self.captcha = CaptchaSolver(
-            self.client,
-            self.tg_logger,
-            label,
-        )
-
-        self.core = BotCore(
-            self.client,
-            self.tg_logger,
-            self.captcha,
-            self.bot_lock,
-            label,
-        )
+        self.tg_logger = TgLogger(self.client, label, self.db)
+        self.profile_stats = ProfileStats(self.tg_logger, self.db)
+        self.bio_manager = BioManager(self.client, self.tg_logger, label)
+        self.captcha = CaptchaSolver(self.client, self.tg_logger, label)
+        self.core = BotCore(self.client, self.tg_logger, self.captcha, self.bot_lock, label)
 
         self.daily = DailyClaimer(
-            self.client,
-            self.core,
-            self.tg_logger,
-            self.profile_stats,
-            self.bio_manager,
-            label,
-            self.db,
+            self.client, self.core, self.tg_logger, self.profile_stats,
+            self.bio_manager, label, self.db,
         )
-
         self.tasks = TaskRunner(
-            self.client,
-            self.core,
-            self.tg_logger,
-            self.profile_stats,
-            label,
-            self.db,
+            self.client, self.core, self.tg_logger, self.profile_stats, label, self.db,
         )
+        # Сдвиг первого цикла заданий: аккаунты не должны одновременно
+        # выполнять самую тяжёлую часть работы.
+        self.tasks.start_offset = index * TASK_START_STAGGER_SEC
 
         self.promo = PromoHunter(
-            self.client,
-            self.core,
-            self.tg_logger,
-            self.profile_stats,
-            label,
-            self.db,
+            self.client, self.core, self.tg_logger, self.profile_stats, label, self.db,
         )
+        self.checks = CheckHunter(self.client, self.core, self.tg_logger, label, self.db)
+        self.promo.checks = self.checks
 
+        self.watcher = ChannelWatcher(
+            self.client, label, WATCH_CHANNELS, self.promo.on_post, self.tg_logger,
+        )
         self.clicker = Clicker(
-            self.client,
-            self.core,
-            self.tg_logger,
-            self.profile_stats,
-            label,
-            self.db,
+            self.client, self.core, self.tg_logger, self.profile_stats, label, self.db,
         )
 
         self._background_tasks = []
+        self._bot_dm_handler = None
 
+    # ------------------------------------------------------------------
     async def start(self):
         await self.client.start()
 
         self._register_bot_dm_handler()
-        self.promo.register_channel_handler()
 
         await self.db.start()
         await self.db.set_connected(True)
 
-        await self.client.catch_up()
         await self.tg_logger.setup()
+        self.tg_logger.start_worker()
+
+        # Ловля промо/чеков поднимается РАНЬШЕ всего остального (био, баланс,
+        # приветственный лог) — это самая срочная функция аккаунта.
+        await self.watcher.start()
+        self.ready = True
+        try:
+            await self.client.catch_up()
+        except Exception as e:
+            logger.warning("[%s] catch_up: %s", self.label, e)
 
         await self.bio_manager.ensure_referral_bio()
-
-        # Сразу после запуска читаем реальный баланс из Профиля.
-        # Дальше он обновляется после daily / tasks / promo /
-        # каждых 10 успешных кликов.
         await self._refresh_real_balance()
 
         await self.tg_logger.log(
             "🤖 Бот запущен!\n"
             "📅 Ежедневка: по времени бота\n"
             "📋 Задания: каждые ~2ч15м-3ч45м\n"
-            "🔔 Промокоды: мгновенный детект + быстрые повторы\n"
+            "🔔 Промокоды и чеки: события + опрос канала каждые несколько секунд\n"
             "🎮 Кликер: рандом раз в день, окно 8:00-00:00\n"
             "💰 Баланс: читается из Профиля бота\n"
         )
-
-        await self.db.log(
-            "INFO",
-            "startup",
-            "PatrickAccount started",
-        )
+        await self.db.log("INFO", "startup", "PatrickAccount started")
 
         self._background_tasks = [
-            asyncio.create_task(
-                self.daily.run_forever()
-            ),
-            asyncio.create_task(
-                self.tasks.run_forever()
-            ),
-            asyncio.create_task(
-                self.clicker.run_forever()
-            ),
-            asyncio.create_task(
-                self._stats_cycle()
-            ),
-            asyncio.create_task(
-                self._channel_touch_cycle()
-            ),
+            asyncio.create_task(self._supervised("daily", self.daily.run_forever)),
+            asyncio.create_task(self._supervised("tasks", self.tasks.run_forever)),
+            asyncio.create_task(self._supervised("clicker", self.clicker.run_forever)),
+            asyncio.create_task(self._supervised("stats", self._stats_cycle)),
+            asyncio.create_task(self._supervised("watchdog", self._watchdog)),
         ]
+
+    async def _supervised(self, name: str, factory):
+        """Фоновая задача перезапускается, если упала: раньше одно
+        необработанное исключение молча убивало, например, кликер до
+        следующего деплоя."""
+        backoff = 15
+        while True:
+            try:
+                await factory()
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.exception("[%s] задача %s упала: %s", self.label, name, e)
+                await self.tg_logger.log(f"Задача {name} упала, перезапуск через {backoff}с", error=repr(e)[:200])
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 600)
+
+    async def _watchdog(self):
+        """Если соединение пропало и Telethon сам не поднял — поднимаем."""
+        misses = 0
+        while True:
+            await asyncio.sleep(60)
+            if self.client.is_connected():
+                misses = 0
+                continue
+            misses += 1
+            if misses >= 2:
+                logger.warning("[%s] нет соединения, переподключаюсь", self.label)
+                try:
+                    await self.client.connect()
+                    misses = 0
+                except Exception as e:
+                    logger.warning("[%s] переподключение не удалось: %s", self.label, e)
 
     async def _refresh_real_balance(self):
         """Открывает Профиль и сохраняет реальный баланс."""
         try:
             async with self.core.bot_lock.acquire():
                 msg = await self.core._open_unlocked()
-
-                if not msg or not msg.buttons:
+                btn = find_button(msg, ["профил", "profile"])
+                if not btn:
                     return False
-
-                for row in msg.buttons:
-                    for btn in row:
-                        if any(
-                            word in btn.text.lower()
-                            for word in [
-                                "профил",
-                                "profile",
-                            ]
-                        ):
-                            since = (
-                                __import__(
-                                    "core"
-                                ).utcnow()
-                            )
-
-                            await btn.click()
-
-                            resp = (
-                                await self.core.wait_fresh(
-                                    since,
-                                    timeout=8,
-                                )
-                            )
-
-                            if resp:
-                                return await (
-                                    self.profile_stats
-                                    .update_from_profile_text(
-                                        resp.text or ""
-                                    )
-                                )
-
-                            return False
-
+                since = utcnow()
+                await self.core.click_button(btn)
+                resp = await self.core.wait_fresh(since, timeout=8)
+                if resp:
+                    return await self.profile_stats.update_from_profile_text(resp.text or "")
+                return False
         except Exception as e:
-            logger.warning(
-                "[%s] Не удалось получить "
-                "реальный баланс: %s",
-                self.label,
-                e,
-            )
-
+            logger.warning("[%s] Не удалось получить реальный баланс: %s", self.label, e)
         return False
 
-    async def _channel_touch_cycle(self):
-        entity = None
-
-        while True:
-            try:
-                if entity is None:
-                    entity = await self.client.get_entity(
-                        CHANNEL_SOURCE
-                    )
-
-                await self.core.touch_channel(
-                    entity
-                )
-
-            except Exception as e:
-                logger.warning(
-                    "[%s] _channel_touch_cycle: %s",
-                    self.label,
-                    e,
-                )
-
-            await asyncio.sleep(
-                CHANNEL_TOUCH_INTERVAL_SEC
-            )
-
     def _register_bot_dm_handler(self):
-        @self.client.on(
-            events.NewMessage(
-                chats=TARGET_BOT,
-                incoming=True,
-            )
-        )
-        @self.client.on(
-            events.MessageEdited(
-                chats=TARGET_BOT,
-                incoming=True,
-            )
-        )
         async def handle_bot_dm(event):
+            q = self.core.bot_msg_queue
             try:
-                self.core.bot_msg_queue.put_nowait(
-                    event.message
-                )
+                q.put_nowait(event.message)
             except asyncio.QueueFull:
                 try:
-                    self.core.bot_msg_queue.get_nowait()
+                    q.get_nowait()
                 except asyncio.QueueEmpty:
                     pass
-
                 try:
-                    self.core.bot_msg_queue.put_nowait(
-                        event.message
-                    )
+                    q.put_nowait(event.message)
                 except asyncio.QueueFull:
                     pass
 
+        self.client.add_event_handler(handle_bot_dm, events.NewMessage(chats=TARGET_BOT, incoming=True))
+        self.client.add_event_handler(handle_bot_dm, events.MessageEdited(chats=TARGET_BOT, incoming=True))
         self._bot_dm_handler = handle_bot_dm
 
     async def _stats_cycle(self):
         while True:
-            now = (
-                datetime.datetime.utcnow()
-                + datetime.timedelta(
-                    hours=TIMEZONE_OFFSET
-                )
-            )
-
-            target = now.replace(
-                hour=20,
-                minute=0,
-                second=0,
-                microsecond=0,
-            )
-
+            now = datetime.datetime.utcnow() + datetime.timedelta(hours=TIMEZONE_OFFSET)
+            target = now.replace(hour=20, minute=0, second=0, microsecond=0)
             if now >= target:
-                target += datetime.timedelta(
-                    days=1
-                )
+                target += datetime.timedelta(days=1)
+            await asyncio.sleep((target - now).total_seconds())
 
-            await asyncio.sleep(
-                (target - now).total_seconds()
-            )
-
-            report = (
-                self.profile_stats.daily_report_text(
-                    self.clicker.target_today
-                    or "20-25"
-                )
-            )
-
-            await self.tg_logger.log(
-                report,
-                pin=True,
-            )
-
+            report = self.profile_stats.daily_report_text(self.clicker.target_today or "20-25")
+            await self.tg_logger.log(report, pin=True)
             self.profile_stats.reset_daily()
 
     async def stop(self):
+        self.ready = False
         for task in self._background_tasks:
             task.cancel()
-
+        self._background_tasks = []
+        try:
+            await self.watcher.stop()
+        except Exception:
+            pass
+        if self._bot_dm_handler is not None:
+            try:
+                self.client.remove_event_handler(self._bot_dm_handler)
+            except Exception:
+                pass
+            self._bot_dm_handler = None
+        try:
+            await self.tg_logger.stop_worker()
+        except Exception:
+            pass
         await self.db.set_connected(False)
-        await self.client.disconnect()
-        await self.db.stop()
+        try:
+            await self.client.disconnect()
+        finally:
+            await self.db.stop()
