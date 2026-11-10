@@ -23,6 +23,7 @@ class TaskRunner:
         self.profile_stats = profile_stats
         self.label = label
         self.db = db
+        self.start_offset = 0  # выставляется в account.py (индекс аккаунта * TASK_START_STAGGER_SEC)
 
     async def process_one_task(self, task_msg) -> tuple:
         text = task_msg.text or ""
@@ -50,8 +51,26 @@ class TaskRunner:
             if startapp_url:
                 break
 
+        # Кнопка web_view прямо в сообщении (не ссылка t.me) — открываем через WebView
+        webview_btn = None
+        if not startapp_url:
+            for row in task_msg.buttons:
+                for btn in row:
+                    raw = getattr(btn, 'button', None)
+                    if type(raw).__name__ in ('KeyboardButtonWebView', 'KeyboardButtonSimpleWebView'):
+                        webview_btn = btn
+                        break
+                if webview_btn:
+                    break
+
+        opened = False
         if startapp_url:
-            if await self.core.handle_startapp(startapp_url):
+            opened = await self.core.handle_startapp(startapp_url)
+        elif webview_btn:
+            opened = await self.core.handle_webview_button(task_msg, webview_btn)
+
+        if startapp_url or webview_btn:
+            if opened:
                 since = utcnow()
                 fresh_msg = await self.core.wait_fresh(since, timeout=8)
                 if fresh_msg and "проверка" in (fresh_msg.text or "").lower():
@@ -63,7 +82,7 @@ class TaskRunner:
                 await self.tg_logger.log(f"🚀 Приложение запущено{confirm_note}!\n📄 {text[:80]}")
                 if self.db:
                     await self.db.event("mini_app", stars=0.0, task_type="mini_app")
-                return 'done', f'startapp ({startapp_url[:50]})'
+                return 'done', f'startapp ({(startapp_url or "webview")[:50]})'
 
         for row in task_msg.buttons:
             for btn in row:
@@ -169,7 +188,7 @@ class TaskRunner:
                             break
             return 'skip', text[:100]
 
-        await human_delay(6, 12)
+        await self.core.yield_sleep(6, 12)  # отдаём лок: промокод не ждёт задание
 
         confirmed = False
         if same_msg_confirm_btn:
@@ -198,7 +217,7 @@ class TaskRunner:
 
     # --- Основной цикл заданий ---
     async def run_forever(self):
-        await asyncio.sleep(30)  # даём аккаунту "отлежаться" после старта
+        await asyncio.sleep(30 + self.start_offset)  # даём аккаунту "отлежаться"; сдвиг разводит аккаунты по времени
         while True:
             try:
                 await self.tg_logger.log("📋 Начинаю выполнение заданий...")
