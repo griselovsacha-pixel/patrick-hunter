@@ -186,6 +186,8 @@ class MiniAppRunner:
         self.tg_logger = tg_logger
         self.label = label
         self._seen_unhandled = set()
+        self._warned_main = False
+        self.last_handled = None  # итог обработчика последнего запуска: None — обработчика нет
 
     # ---- открытие ---------------------------------------------------------
     async def open_link(self, url: str) -> Optional[MiniAppSession]:
@@ -219,6 +221,11 @@ class MiniAppRunner:
                     "RequestMainWebViewRequest — обновите telethon (см. requirements.txt)",
                     self.label, bot,
                 )
+                if not self._warned_main:
+                    self._warned_main = True
+                    await self.tg_logger.log(
+                        "⚠️ Ссылки t.me/бот?startapp=… (главное приложение) не открываются: "
+                        "обновите telethon (в requirements.txt нужен >=1.40)", error="старый telethon")
                 return None
             res = await safe_call(
                 lambda: self.client(req_cls(
@@ -308,6 +315,7 @@ class MiniAppRunner:
             keepalive = asyncio.create_task(self._keepalive(session))
 
         handled = None
+        self.last_handled = None
         who = session.bot or session.host
         try:
             target = random.uniform(*MINIAPP_DWELL_RANGE)
@@ -329,6 +337,7 @@ class MiniAppRunner:
             if keepalive:
                 keepalive.cancel()
 
+        self.last_handled = handled
         extra = "" if handled is None else (" · обработчик ✅" if handled else " · обработчик ❌")
         await self.tg_logger.log(f"🧩 Мини-апп {who} открыт{extra}")
         return "ok"
