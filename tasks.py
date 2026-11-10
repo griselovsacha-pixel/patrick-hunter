@@ -7,7 +7,7 @@ import re
 import asyncio
 import logging
 
-from config import ALL_DONE_PHRASES, CONFIRM_WORDS
+from config import ALL_DONE_PHRASES, CONFIRM_WORDS, SKIP_TASK_WORDS
 from utils import is_webapp_button, human_delay, random_task_interval
 from antiban import safe_call
 from core import utcnow
@@ -31,6 +31,15 @@ class TaskRunner:
         if any(phrase in text.lower() for phrase in ALL_DONE_PHRASES):
             return 'all_done', text
 
+        # Платные задания (депозит и т.п.) выполнить нельзя — пропускаем, а не «засчитываем»
+        low = text.lower()
+        if any(w in low for w in SKIP_TASK_WORDS):
+            await self.tg_logger.log(f"⏭️ Задание требует оплаты/депозита — пропускаю\n📄 {text[:100]}")
+            if await self._click_skip(task_msg):
+                return 'skip', 'платное задание'
+            await self.tg_logger.log("Платное задание без кнопки Пропустить", error="ручное вмешательство")
+            return 'all_done', text
+
         has_webapp = bool(task_msg.buttons) and any(
             is_webapp_button(btn) for row in task_msg.buttons for btn in row
         )
@@ -39,6 +48,26 @@ class TaskRunner:
             return await self._handle_webapp_task(task_msg, text)
 
         return await self._handle_regular_task(task_msg, text)
+
+    async def _click_skip(self, task_msg) -> bool:
+        for row in (task_msg.buttons or []):
+            for btn in row:
+                if "пропустить" in btn.text.lower():
+                    try:
+                        await btn.click()
+                    except Exception as e:
+                        logger.warning(f"⚠️ [{self.label}] Клик Пропустить: {e}")
+                        return False
+                    await human_delay(2, 3)
+                    return True
+        return False
+
+    @staticmethod
+    def _start_command(url_or_text: str, target: str) -> str:
+        """t.me/bot?start=PAYLOAD -> '/start PAYLOAD'. Раньше payload терялся и бот спонсора
+        получал голый /start, поэтому запуск бота по реф./заданийной ссылке не засчитывался."""
+        m = re.search(r't\.me/' + re.escape(target) + r'\?(?:[^\s#]*&)?start=([A-Za-z0-9_\-]+)', url_or_text or "", re.I)
+        return f"/start {m.group(1)}" if m else "/start"
 
     async def _handle_webapp_task(self, task_msg, text):
         startapp_url = None
@@ -79,6 +108,8 @@ class TaskRunner:
                         fresh_msg = await self.core.wait_fresh(since, timeout=6)
                 confirmed = await self._click_confirm_if_present(fresh_msg)
                 confirm_note = " и подтверждено" if confirmed else ""
+                if getattr(self.core.miniapp, "last_handled", None) is None:
+                    confirm_note += " (обработчика приложения нет — засчёт у спонсора не гарантирован)"
                 await self.tg_logger.log(f"🚀 Приложение запущено{confirm_note}!\n📄 {text[:80]}")
                 if self.db:
                     await self.db.event("mini_app", stars=0.0, task_type="mini_app")
@@ -135,9 +166,10 @@ class TaskRunner:
                             if tme_match:
                                 target = tme_match.group(1)
                                 if target.lower().endswith('bot'):
-                                    await safe_call(lambda t=target: self.client.send_message(t, '/start'), action="task_start_bot")
+                                    cmd = self._start_command(url, target)
+                                    await safe_call(lambda t=target, c=cmd: self.client.send_message(t, c), action="task_start_bot")
                                     await self.core.archive_chat(target)
-                                    action_parts.append(f"запустил бота @{target}")
+                                    action_parts.append(f"запустил бота @{target}" + (" (с параметром)" if cmd != "/start" else ""))
                                 else:
                                     await self.core.safe_join(target)
                                     action_parts.append(f"подписался на {target}")
@@ -150,9 +182,10 @@ class TaskRunner:
         if not action_done:
             for target in re.findall(r't\.me/(\+?[a-zA-Z0-9_]+)', text):
                 if target.lower().endswith('bot'):
-                    await safe_call(lambda t=target: self.client.send_message(t, '/start'), action="task_start_bot")
+                    cmd = self._start_command(text, target)
+                    await safe_call(lambda t=target, c=cmd: self.client.send_message(t, c), action="task_start_bot")
                     await self.core.archive_chat(target)
-                    action_parts.append(f"запустил бота @{target}")
+                    action_parts.append(f"запустил бота @{target}" + (" (с параметром)" if cmd != "/start" else ""))
                 else:
                     await self.core.safe_join(target)
                     action_parts.append(f"подписался на {target}")
