@@ -4,6 +4,7 @@ TgLogger — единая точка логирования в группу (с�
 Формат каждой записи: точное время, что сделал, была ли ошибка (и какая).
 Для достижения звёздных вех и для ошибок — дополнительно закрепляем сообщение.
 """
+import asyncio
 import datetime
 import logging
 
@@ -27,6 +28,14 @@ class TgLogger:
         self.label = label
         self.db = db
         self.group_entity = None  # резолвится в setup()
+        # Лог НИКОГДА не должен тормозить рабочий код. Раньше log() делал
+        # запись в Supabase и send_message в группу прямо в вызывающем
+        # коде: на горячем пути промокода это +1-3с до первой попытки, а
+        # при FloodWait на отправке в группу — сон до 10 минут ПРЯМО внутри
+        # активации. Теперь log() только кладёт запись в очередь, а
+        # отправляет отдельный воркер со своим темпом.
+        self._queue: asyncio.Queue = asyncio.Queue(maxsize=200)
+        self._worker = None
 
     async def setup(self):
         """Вступаем в группу логов (если ещё не вступили) и резолвим entity.
@@ -45,12 +54,53 @@ class TgLogger:
         except Exception as e:
             logger.error(f"[{self.label}] Не смог вступить в группу логов: {e}")
 
+    def start_worker(self):
+        if self._worker is None or self._worker.done():
+            self._worker = asyncio.create_task(self._run_worker())
+
+    async def stop_worker(self):
+        if self._worker and not self._worker.done():
+            self._worker.cancel()
+            try:
+                await self._worker
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._worker = None
+
+    async def _run_worker(self):
+        while True:
+            action, error, pin = await self._queue.get()
+            try:
+                await self._deliver(action, error, pin)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"[{self.label}] Воркер логов: {e}")
+            await asyncio.sleep(1.2)  # темп: не упираемся во FloodWait группы
+
     async def log(self, action: str, error: str = None, pin: bool = False):
-        """Основной метод: отправляет запись 'время / действие / ошибка'.
-        Всегда пишет и в консоль (Render-логи), группа — best-effort."""
+        """Основной метод: 'время / действие / ошибка'. Возвращается сразу —
+        консоль пишем тут же (Render-логи), Supabase и группу — воркер."""
         status = f"❌ ОШИБКА: {error}" if error else "✅ OK"
-        line = f"🕐 {_now_str()} [{self.label}]\n{action}\n{status}"
         (logger.error if error else logger.info)(f"[{self.label}] {action} | {status}")
+        item = (action, error, pin)
+        if self._worker is None:
+            # воркер ещё не запущен (ранний старт) — не теряем запись
+            self.start_worker()
+        try:
+            self._queue.put_nowait(item)
+        except asyncio.QueueFull:
+            try:
+                self._queue.get_nowait()  # выбрасываем самую старую
+            except asyncio.QueueEmpty:
+                pass
+            try:
+                self._queue.put_nowait(item)
+            except asyncio.QueueFull:
+                pass
+
+    async def _deliver(self, action: str, error: str, pin: bool):
+        line = f"🕐 {_now_str()} [{self.label}]\n{action}\n" + (f"❌ ОШИБКА: {error}" if error else "✅ OK")
         if self.db:
             await self.db.log("ERROR" if error else "INFO", "telegram", action, error=error)
 
