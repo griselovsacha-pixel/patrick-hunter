@@ -5,6 +5,7 @@
 import re
 import random
 import asyncio
+from collections import OrderedDict
 
 from config import PROMO_KEYWORDS, IGNORED_WORDS, CONFIRM_WORDS, SPONSOR_GATE_HINTS, BIO_LINK_HINTS
 from config import TASK_INTERVAL_MIN_SEC, TASK_INTERVAL_MAX_SEC
@@ -12,6 +13,87 @@ from config import TASK_INTERVAL_MIN_SEC, TASK_INTERVAL_MAX_SEC
 
 async def human_delay(min_sec: float = 2.0, max_sec: float = 4.0):
     await asyncio.sleep(random.uniform(min_sec, max_sec))
+
+
+URL_RE = re.compile(r'(?:https?://|tg://|(?:www\.)?t\.me/|telegram\.me/)\S+', re.IGNORECASE)
+
+_START_LINK_RE = re.compile(
+    r'(?:https?://)?(?:www\.)?(?:t\.me|telegram\.me)/([A-Za-z0-9_]{3,})/?\?start=([A-Za-z0-9_\-]+)',
+    re.IGNORECASE,
+)
+_TG_RESOLVE_RE = re.compile(
+    r'tg://resolve\?domain=([A-Za-z0-9_]{3,})&start=([A-Za-z0-9_\-]+)', re.IGNORECASE,
+)
+
+
+class BoundedSet:
+    """Множество с ограничением размера (вытесняет самые старые).
+    Нужно, чтобы кэши «уже видели/активировали» не росли бесконечно."""
+
+    def __init__(self, maxlen: int = 200):
+        self.maxlen = maxlen
+        self._d: "OrderedDict[object, None]" = OrderedDict()
+
+    def add(self, item) -> None:
+        self._d.pop(item, None)
+        self._d[item] = None
+        while len(self._d) > self.maxlen:
+            self._d.popitem(last=False)
+
+    def __contains__(self, item) -> bool:
+        return item in self._d
+
+    def __len__(self) -> int:
+        return len(self._d)
+
+
+def collect_urls(message) -> list:
+    """Все ссылки поста: из текста, из entity (текст со скрытой ссылкой) и
+    из URL-кнопок под постом."""
+    urls = []
+    raw = getattr(message, "raw_text", None) or getattr(message, "text", None) or ""
+    urls += re.findall(r'(?:https?://|tg://)\S+|(?:t\.me|telegram\.me)/\S+', raw)
+    for ent in getattr(message, "entities", None) or []:
+        u = getattr(ent, "url", None)
+        if u:
+            urls.append(u)
+    try:
+        rows = message.buttons or []
+    except Exception:
+        rows = []
+    for row in rows:
+        for btn in row:
+            u = getattr(btn, "url", None)
+            if u:
+                urls.append(u)
+    return urls
+
+
+def extract_start_links(message) -> list:
+    """[(bot_username_lower, payload), ...] из ссылок вида
+    t.me/<bot>?start=<payload> / tg://resolve?domain=<bot>&start=<payload>.
+    Дубликаты убираются, порядок сохраняется."""
+    found, seen = [], set()
+    for url in collect_urls(message):
+        for rx in (_START_LINK_RE, _TG_RESOLVE_RE):
+            for bot, payload in rx.findall(url):
+                key = (bot.lower(), payload)
+                if key not in seen:
+                    seen.add(key)
+                    found.append(key)
+    return found
+
+
+def find_button(msg, words):
+    """Первая кнопка сообщения, в тексте которой есть любое из слов."""
+    if not msg or not msg.buttons:
+        return None
+    for row in msg.buttons:
+        for btn in row:
+            low = btn.text.lower()
+            if any(w in low for w in words):
+                return btn
+    return None
 
 
 def solve_math(text: str):
@@ -38,7 +120,8 @@ def is_webapp_button(btn) -> bool:
     btn_text = btn.text.lower()
     if any(w in btn_text for w in ["запустить приложение", "открыть приложение", "webapp", "open app"]):
         return True
-    if type(btn).__name__ in ['KeyboardButtonWebView', 'InlineKeyboardButtonWebApp', 'KeyboardButtonSimpleWebView']:
+    raw = getattr(btn, 'button', btn)  # Telethon-обёртка MessageButton хранит настоящую кнопку в .button
+    if type(raw).__name__ in ['KeyboardButtonWebView', 'InlineKeyboardButtonWebApp', 'KeyboardButtonSimpleWebView']:
         return True
     url = getattr(btn, 'url', None)
     if url and any(w in url.lower() for w in ['startapp', 'tgwebapp']):
@@ -94,6 +177,10 @@ def find_promo_in_text(text: str):
     if not any(w in lower_text for w in PROMO_KEYWORDS):
         return None
 
+    # Ссылки вырезаем ДО чистки пунктуации: раньше из t.me/bot?start=880628963
+    # в фолбэк попадал токен "880628963" и принимался за промокод (есть
+    # цифры). Коды внутри deep-link ловит отдельный путь (extract_start_links).
+    text = URL_RE.sub(" ", text)
     clean_text = text.replace("**", " ").replace("__", " ").replace("`", " ").replace("||", " ")
     for char in [".", ",", "!", "?", ":", ";", "()", "[]", "»", "«", "—", "–"]:
         clean_text = clean_text.replace(char, " ")
