@@ -27,6 +27,43 @@ TIMEZONE_OFFSET = 3  # UTC+3
 # комментарий у _channel_touch_cycle в account.py).
 CHANNEL_TOUCH_INTERVAL_SEC = int(os.getenv("CHANNEL_TOUCH_INTERVAL_SEC", "20"))
 
+# --- Наблюдение за каналом(ами) ---
+# События Telegram (NewMessage) — основной быстрый путь, но они иногда не
+# приходят (особенно со StringSession на Render после рестарта). Поэтому
+# параллельно каждый аккаунт сам опрашивает канал раз в N секунд. Дубли
+# отсекаются по (id поста, время правки, текст) — один пост = одна реакция.
+CHANNEL_POLL_INTERVAL_SEC = float(os.getenv("CHANNEL_POLL_INTERVAL_SEC", "3"))
+# Дополнительные каналы (через запятую в env), где тоже ловим промо/чеки.
+WATCH_CHANNELS = [CHANNEL_SOURCE] + [
+    c.strip().lstrip("@") for c in os.getenv("EXTRA_WATCH_CHANNELS", "").split(",") if c.strip()
+]
+
+# --- Чеки ---
+# Боты, чьи ссылки вида t.me/<bot>?start=<payload> в постах канала считаем
+# чеками. Название бота сравнивается без регистра. Ссылки на TARGET_BOT
+# тоже обрабатываются (там payload шлётся как /start <payload>).
+CHECK_BOTS = {
+    b.strip().lower().lstrip("@")
+    for b in os.getenv(
+        "CHECK_BOTS",
+        "send,CryptoBot,xRocket,tonRocketBot,wallet,patrickstarsrobot",
+    ).split(",")
+    if b.strip()
+}
+
+# --- Несколько аккаунтов ---
+MAX_ACCOUNTS = int(os.getenv("MAX_ACCOUNTS", "5"))
+# Пауза между стартами аккаунтов (аккаунт i стартует через i * N сек), чтобы
+# они не прогревались одновременно (пик памяти/CPU на Render free).
+ACCOUNT_START_STAGGER_SEC = int(os.getenv("ACCOUNT_START_STAGGER_SEC", "20"))
+# Сдвиг первого цикла заданий для аккаунта i: 30с + i * N (тяжёлые циклы
+# заданий разных аккаунтов не должны стартовать в одну секунду).
+TASK_START_STAGGER_SEC = int(os.getenv("TASK_START_STAGGER_SEC", "150"))
+
+# --- Защита от OOM на Render free (лимит 512 МБ) ---
+MEMORY_SOFT_LIMIT_MB = int(os.getenv("MEMORY_SOFT_LIMIT_MB", "380"))
+MEMORY_HARD_LIMIT_MB = int(os.getenv("MEMORY_HARD_LIMIT_MB", "470"))
+
 # --- Кликер: рандомим количество кликов в день в этом диапазоне (вкл.) ---
 CLICKER_MIN_PER_DAY = 27
 CLICKER_MAX_PER_DAY = 30
@@ -133,20 +170,30 @@ FRUIT_MAP = {
 
 
 def load_account_sessions():
-    """Load up to three accounts; missing sessions are skipped safely.
+    """Загружает до MAX_ACCOUNTS аккаунтов: TELEGRAM_SESSION_1, _2, ...
 
-    TELEGRAM_SESSION is kept as a backwards-compatible alias for account 1.
+    TELEGRAM_SESSION — старый алиас для аккаунта 1. Пустые слоты пропускаются.
     """
     sessions = []
-    env_names = ("TELEGRAM_SESSION_1", "TELEGRAM_SESSION_2", "TELEGRAM_SESSION_3")
-    labels = ("Аккаунт 1", "Аккаунт 2", "Аккаунт 3")
-    for label, env_name in zip(labels, env_names):
+    for n in range(1, MAX_ACCOUNTS + 1):
+        env_name = f"TELEGRAM_SESSION_{n}"
         value = os.getenv(env_name)
-        if not value and env_name == "TELEGRAM_SESSION_1":
+        if not value and n == 1:
             value = os.getenv("TELEGRAM_SESSION")
         if value:
-            sessions.append((label, value))
-        else:
-            logging_msg = f"⚠️ {label}: {env_name} не задан — аккаунт пропущен"
-            print(logging_msg)
+            sessions.append((f"Аккаунт {n}", value.strip()))
+        elif n <= 3:
+            print(f"⚠️ Аккаунт {n}: {env_name} не задан — пропущен")
     return sessions
+
+# --- Мини-аппы (miniapp.py) ---
+# MINIAPP_REAL_OPEN=0 — вернуть старое поведение (StartBotRequest + пауза).
+MINIAPP_REAL_OPEN = os.getenv("MINIAPP_REAL_OPEN", "1") != "0"
+# Платформа, которую видит приложение (tgWebAppPlatform): android / ios / tdesktop / weba
+MINIAPP_PLATFORM = os.getenv("MINIAPP_PLATFORM", "android")
+# Сколько «находимся» в приложении (сек)
+MINIAPP_DWELL_RANGE = (25, 35)
+# Как часто слать ProlongWebView, пока приложение открыто (клиенты шлют раз в ~60с)
+MINIAPP_PROLONG_INTERVAL_SEC = int(os.getenv("MINIAPP_PROLONG_INTERVAL_SEC", "50"))
+# Общий таймаут обработчика конкретного приложения
+MINIAPP_HANDLER_TIMEOUT_SEC = int(os.getenv("MINIAPP_HANDLER_TIMEOUT_SEC", "40"))
