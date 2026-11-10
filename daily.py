@@ -211,4 +211,3 @@ class DailyClaimer:
         while True:
             wait_sec = await self.collect_once()
             await asyncio.sleep(wait_sec)
-
