@@ -6,6 +6,7 @@ promo.py, clicker.py) держат ссылку на core и пользуютс�
 а не лезут в Telethon напрямую.
 """
 import re
+import random
 import asyncio
 import datetime
 import logging
@@ -16,7 +17,8 @@ from telethon.tl.functions.folders import EditPeerFoldersRequest
 from telethon.tl.types import InputFolderPeer
 from telethon.errors import UserAlreadyParticipantError, InviteHashInvalidError
 
-from config import TARGET_BOT, CONFIRM_WORDS
+from config import TARGET_BOT, CONFIRM_WORDS, MINIAPP_REAL_OPEN
+from miniapp import MiniAppRunner, parse_app_link
 from utils import looks_like_sponsor_gate, human_delay
 from antiban import safe_call
 
@@ -38,7 +40,10 @@ class BotCore:
         # Очередь входящих сообщений от TARGET_BOT — для мгновенного
         # (событийного) ожидания ответа вместо опроса истории раз в 1.5с.
         # Заполняется из account.py через register_bot_dm_handler().
-        self.bot_msg_queue: asyncio.Queue = asyncio.Queue(maxsize=50)
+        self.bot_msg_queue: asyncio.Queue = asyncio.Queue(maxsize=30)
+
+        # Настоящий запуск мини-аппов (WebView + keepalive + обработчики).
+        self.miniapp = MiniAppRunner(client, self, tg_logger, label)
 
     # --- Очередь свежих сообщений от бота ---
     def _drain_queue(self):
@@ -95,12 +100,30 @@ class BotCore:
         except Exception as e:
             logger.warning(f"⚠️ [{self.label}] touch_channel ошибка: {e}")
 
-    async def wait_fresh(self, since: datetime.datetime, timeout: float = 10.0):
-        """Мгновенное (событийное) ожидание ответа бота. `since` отсекает
-        старые/застрявшие сообщения — берём только то, что пришло ПОСЛЕ
-        нашего действия. Важно: бот часто РЕДАКТИРУЕТ одно и то же
-        сообщение вместо отправки нового — .date при этом не меняется,
-        поэтому сравниваем по (edit_date or date)."""
+    # Telegram отдаёт message.date с точностью до СЕКУНДЫ, а наш `since` —
+    # с микросекундами. Раньше сравнивали `date > since`, и ответ бота,
+    # пришедший за 0.3с, "из прошлой секунды" отбрасывался как старый:
+    # wait_fresh молча висел до таймаута (8с) + ещё до 12с в poll_response
+    # на КАЖДОМ шаге. Для промокода (4-5 шагов) это десятки секунд — код к
+    # тому времени уже исчерпан. Теперь сравниваем с `since`, округлённым
+    # вниз до секунды, минус небольшой допуск на расхождение часов.
+    CLOCK_TOLERANCE_SEC = 1.0
+
+    def _floor(self, since: datetime.datetime) -> datetime.datetime:
+        return since.replace(microsecond=0) - datetime.timedelta(seconds=self.CLOCK_TOLERANCE_SEC)
+
+    async def wait_fresh(self, since: datetime.datetime, timeout: float = 10.0,
+                         *, predicate=None, fallback: bool = True):
+        """Событийное ожидание ответа бота.
+
+        predicate(msg) -> bool: принимать только подходящие сообщения
+        (например, экран с кнопкой «Промокод»); остальные пропускаем.
+        fallback=False: после таймаута не уходить в медленный опрос
+        истории (poll_response до ~12с), а сделать один быстрый запрос
+        (poll_once). Критичные по скорости пути (промокод) используют его.
+        Бот часто РЕДАКТИРУЕТ одно сообщение — поэтому смотрим на
+        (edit_date or date)."""
+        floor = self._floor(since)
         loop = asyncio.get_event_loop()
         deadline = loop.time() + timeout
         while True:
@@ -114,9 +137,28 @@ class BotCore:
             if msg.out:
                 continue  # страховка: наши исходящие сюда попадать не должны
             effective_date = msg.edit_date or msg.date
-            if effective_date > since and (msg.text or msg.buttons):
-                return msg
-        return await self.poll_response()
+            if effective_date >= floor and (msg.text or msg.buttons):
+                if predicate is None or predicate(msg):
+                    return msg
+        if fallback:
+            return await self.poll_response()
+        return await self.poll_once(floor, predicate)
+
+    async def poll_once(self, floor: datetime.datetime, predicate=None):
+        """Один быстрый запрос истории: самое свежее подходящее сообщение
+        бота новее `floor`, либо None."""
+        try:
+            async for msg in self.client.iter_messages(TARGET_BOT, limit=5):
+                if msg.out:
+                    continue
+                effective_date = msg.edit_date or msg.date
+                if effective_date < floor:
+                    return None  # дальше только старее
+                if (msg.text or msg.buttons) and (predicate is None or predicate(msg)):
+                    return msg
+        except Exception as e:
+            logger.warning(f"⚠️ [{self.label}] poll_once ошибка: {e}")
+        return None
 
     async def poll_response(self, max_age: int = 120, attempts: int = 8):
         """Медленный фолбэк опросом истории чата — на случай пропуска события."""
@@ -134,6 +176,12 @@ class BotCore:
             if not msg.out:
                 return msg
         return None
+
+    async def yield_sleep(self, min_sec: float, max_sec: float):
+        """Человеческая пауза ВНУТРИ удерживаемого bot_lock, во время которой
+        лок отдаётся (промокод может пройти), а потом берётся обратно.
+        Вызывать только из кода, уже держащего bot_lock."""
+        await self.bot_lock.yield_for(random.uniform(min_sec, max_sec))
 
     # --- Архивирование и join ---
     async def archive_chat(self, entity):
@@ -165,6 +213,32 @@ class BotCore:
             logger.error(f"[{self.label}] Ошибка вступления {target}: {e}")
 
     async def handle_startapp(self, url: str) -> bool:
+        """Открыть мини-апп по ссылке t.me/bot[/app]?startapp=... .
+        Сначала — по-настоящему (WebView, см. miniapp.py); если не вышло —
+        старый путь (StartBotRequest + пауза), чтобы не потерять задание."""
+        if MINIAPP_REAL_OPEN:
+            try:
+                res = await self.miniapp.run_link(url)
+                if res == "ok":
+                    parsed = parse_app_link(url)
+                    if parsed:
+                        await self.archive_chat(parsed[0])
+                    return True
+                if res == "blocked":
+                    return False  # Cloudflare-проверка: старый путь не пробуем, задание пропустится
+            except Exception as e:
+                logger.error(f"⚠️ [{self.label}] WebView мини-аппа не открылся, пробую старый путь: {e}")
+        return await self._legacy_startapp(url)
+
+    async def handle_webview_button(self, msg, btn) -> bool:
+        """Кнопка web_view / simple_web_view прямо в сообщении бота."""
+        try:
+            return await self.miniapp.run_button(msg, btn) == "ok"
+        except Exception as e:
+            logger.error(f"⚠️ [{self.label}] WebView-кнопка: {e}")
+            return False
+
+    async def _legacy_startapp(self, url: str) -> bool:
         try:
             match = re.search(r't\.me/([a-zA-Z0-9_]+)(?:/\w+)?\?startapp=([a-zA-Z0-9_]+)', url)
             if not match:
@@ -176,7 +250,8 @@ class BotCore:
                 action="startapp",
             )
             await self.archive_chat(bot_username)
-            await human_delay(25, 35)
+            # Долгая пауза мини-аппа: отдаём лок, чтобы за это время мог пройти промокод.
+            await self.yield_sleep(25, 35)
             return True
         except Exception as e:
             logger.error(f"⚠️ [{self.label}] StartApp ошибка: {e}")
@@ -230,6 +305,7 @@ class BotCore:
         состояние бота, либо (если по ошибке дёрнуть open_bot() изнутри
         уже удержанного лока) самодедлок навсегда — см. историю багов
         в promo.py/clicker.py, оба чинились именно этим."""
+        self._drain_queue()  # всё, что в очереди сейчас, — устаревшее
         since = utcnow()
         await safe_call(lambda: self.client.send_message(TARGET_BOT, '/start'), action="send_start")
         msg = await self.wait_fresh(since, timeout=10)
