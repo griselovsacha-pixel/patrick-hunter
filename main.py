@@ -17,8 +17,12 @@ from fastapi import Header, HTTPException
 from fastapi.responses import FileResponse
 from fastapi import FastAPI
 
-from config import load_account_sessions
+from telethon import errors as tg_errors
+
+from config import load_account_sessions, ACCOUNT_START_STAGGER_SEC
 from account import PatrickAccount
+from hub import Hub
+from memguard import memory_guard_cycle, rss_mb
 
 logging.basicConfig(
     level=logging.INFO,
@@ -30,6 +34,17 @@ logger = logging.getLogger(__name__)
 
 accounts: list = []
 _background_tasks: list = []
+hub = Hub()
+
+# Ошибки, при которых повторный старт аккаунта бессмыслен (сессия умерла).
+FATAL_AUTH_ERRORS = tuple(
+    getattr(tg_errors, name)
+    for name in (
+        "AuthKeyError", "AuthKeyUnregisteredError", "SessionRevokedError",
+        "SessionExpiredError", "UserDeactivatedError", "UserDeactivatedBanError",
+    )
+    if hasattr(tg_errors, name)
+)
 
 ADMIN_TIMEZONE = ZoneInfo("Europe/Kyiv")
 
@@ -64,6 +79,39 @@ async def keep_alive_cycle():
             )
 
 
+async def run_account(acc: PatrickAccount):
+    """Супервизор одного аккаунта: стартует со сдвигом и пытается подняться
+    снова при сбое (сеть, временный FloodWait). Падение/зависание одного
+    аккаунта на другой не влияет — у каждого свой супервизор и своя задача."""
+    if acc.index:
+        await asyncio.sleep(acc.index * ACCOUNT_START_STAGGER_SEC)
+
+    backoff = 30
+    while True:
+        try:
+            await acc.start()
+            logger.info("✅ [%s] запущен", acc.label)
+            return
+        except asyncio.CancelledError:
+            raise
+        except FATAL_AUTH_ERRORS as e:
+            logger.error("❌ [%s] сессия недействительна (%s) — аккаунт отключён, "
+                         "нужна новая TELEGRAM_SESSION", acc.label, type(e).__name__)
+            try:
+                await acc.stop()
+            except Exception:
+                pass
+            return
+        except Exception as e:
+            logger.exception("❌ [%s] не запустился: %s — повтор через %dс", acc.label, e, backoff)
+            try:
+                await acc.stop()
+            except Exception:
+                pass
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 600)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global accounts
@@ -72,39 +120,23 @@ async def lifespan(app: FastAPI):
     sessions = load_account_sessions()
 
     if not sessions:
-        logger.warning(
-            "⚠️ Telegram sessions не найдены"
-        )
+        logger.warning("⚠️ Telegram sessions не найдены")
         yield
         return
 
     accounts = [
-        PatrickAccount(label, session)
-        for label, session in sessions
+        PatrickAccount(label, session, index)
+        for index, (label, session) in enumerate(sessions)
     ]
+    for acc in accounts:
+        hub.register(acc)
 
-    for index, acc in enumerate(accounts):
-        if index:
-            await asyncio.sleep(index * 2)
-
-        try:
-            await acc.start()
-            logger.info(
-                "✅ [%s] запущен",
-                acc.label,
-            )
-        except Exception as e:
-            logger.exception(
-                "❌ [%s] не запущен: %s",
-                acc.label,
-                e,
-            )
-
-    _background_tasks.append(
-        asyncio.create_task(
-            keep_alive_cycle()
-        )
-    )
+    # HTTP-сервер поднимается сразу (Render ждёт открытый порт), аккаунты
+    # стартуют в фоне, каждый в своей задаче и со своим сдвигом.
+    for acc in accounts:
+        _background_tasks.append(asyncio.create_task(run_account(acc)))
+    _background_tasks.append(asyncio.create_task(keep_alive_cycle()))
+    _background_tasks.append(asyncio.create_task(memory_guard_cycle()))
 
     yield
 
@@ -115,11 +147,7 @@ async def lifespan(app: FastAPI):
         try:
             await acc.stop()
         except Exception as e:
-            logger.warning(
-                "Ошибка остановки %s: %s",
-                acc.label,
-                e,
-            )
+            logger.warning("Ошибка остановки %s: %s", acc.label, e)
 
 
 app = FastAPI(lifespan=lifespan)
@@ -131,6 +159,8 @@ async def health():
     return {
         "status": "ok",
         "accounts": len(accounts),
+        "ready": [acc.label for acc in accounts if acc.ready],
+        "rss_mb": round(rss_mb()),
     }
 
 
