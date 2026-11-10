@@ -1,30 +1,40 @@
 """
-PromoHunter — детект промокода в канале и его активация.
+PromoHunter — детект промокода в постах канала и его активация.
 
-Скорость решается ДВУМЯ вещами одновременно:
-  1. Детект событийный (events.NewMessage/MessageEdited) — реагируем в
-     момент публикации поста, без опроса.
-  2. Активация идёт с high_priority=True на bot_lock — не стоит в очереди
-     за циклом заданий (см. priority_lock.py), плюс несколько быстрых
-     попыток подряд (PROMO_MAX_ATTEMPTS) с маленькой паузой вместо
-     "1 раз и сдался" или "спам без пауз и мгновенный бан".
+Что изменилось по сравнению с прошлой версией (почему коды "не ловились"):
+  1. Ожидание ответов бота теперь не висит до таймаута из-за сравнения
+     дат с точностью до секунды (см. core.wait_fresh) — на каждом из ~5
+     шагов активации терялись 8-20 секунд.
+  2. Логи в Telegram/Supabase больше не стоят на пути активации
+     (см. tg_logger.py): раньше перед первой попыткой был сетевой запрос,
+     а при FloodWait в группе логов активация могла уснуть на минуты.
+  3. Любая ошибка попытки (таймаут клика, RPC-ошибка) теперь ведёт к
+     повтору; раньше исключение убивало ВСЮ активацию, и остальные 7
+     попыток не выполнялись.
+  4. Отказ бота («неверный/использован») больше не считается успехом и не
+     пишется в статистику как «активирован +2⭐».
+  5. Пост приходит не только событием, но и опросом канала (watcher.py),
+     а найденный одним аккаунтом код сразу уходит остальным (hub.py).
 """
-import datetime
 import asyncio
-import re
 import logging
 
-from telethon import events
-
 from config import (
-    CHANNEL_SOURCE, TARGET_BOT, PROMO_KEYWORDS, PROMO_REJECT_KEYWORDS,
+    TARGET_BOT, PROMO_KEYWORDS, PROMO_REJECT_KEYWORDS,
     PROMO_MAX_ATTEMPTS, PROMO_RETRY_DELAY_RANGE,
 )
-from utils import find_promo_in_text, human_delay
+from utils import find_promo_in_text, extract_start_links, find_button, human_delay, BoundedSet
 from antiban import safe_call, TooManyFloodWaitsError
 from core import utcnow
+from checks import CHECK_WORDS
 
 logger = logging.getLogger(__name__)
+
+# Одна попытка (весь путь /start → профиль → промо → ввод кода) не должна
+# держать лок дольше этого: иначе зависший шаг блокирует аккаунт.
+PROMO_ATTEMPT_TIMEOUT_SEC = 45
+
+OK, REJECTED, RETRY = "ok", "rejected", "retry"
 
 
 class PromoHunter:
@@ -36,150 +46,199 @@ class PromoHunter:
         self.label = label
         self.db = db
 
-        self.activated_promos = set()
+        # Подключаются в account.py после сборки аккаунта.
+        self.hub = None
+        self.checks = None
+
+        self.activated_promos = BoundedSet(100)
         self.promo_in_progress = set()
-        self._channel_handler = None
+        self._tasks = set()
+        self._unrecognized_seen = BoundedSet(100)
 
-    def register_channel_handler(self):
-        @self.client.on(events.NewMessage(chats=CHANNEL_SOURCE))
-        @self.client.on(events.MessageEdited(chats=CHANNEL_SOURCE))
-        async def handle_channel(event):
-            raw = event.raw_text or ""
-            logger.info(f"📨 [{self.label}] Канал: {raw[:120]}")
+    # ------------------------------------------------------------------
+    # Вход: пост канала (из событий или из опроса — см. watcher.py)
+    # ------------------------------------------------------------------
+    async def on_post(self, message):
+        raw = message.raw_text or ""
+        low = raw.lower()
+        logger.info(f"📨 [{self.label}] Канал: {raw[:120]}")
+        handled = False
 
-            code = find_promo_in_text(raw)
-            if code:
-                logger.info(f"🔔 [{self.label}] Промокод найден: {code}")
-                if self.db:
-                    asyncio.create_task(self.db.event("promo_found", promo_code=code))
-                asyncio.create_task(self.activate(code))
-            elif any(w in raw.lower() for w in PROMO_KEYWORDS):
-                await self.tg_logger.log(f"Пост с промо, но код не распознан: {raw[:200]}", error="код не найден")
+        code = find_promo_in_text(raw)
+        if code:
+            handled = True
+            logger.info(f"🔔 [{self.label}] Промокод найден: {code}")
+            if self.db:
+                self._spawn(self.db.event("promo_found", promo_code=code))
+            if self.hub:
+                self.hub.share_promo(self.label, code)
+            self.submit(code)
 
-        self._channel_handler = handle_channel
+        if self.checks:
+            for bot, payload in extract_start_links(message):
+                if self.checks.is_check_link(bot, payload, low):
+                    handled = True
+                    if self.hub:
+                        self.hub.share_check(self.label, bot, payload)
+                    self.checks.submit(bot, payload)
+
+        if not handled and self._looks_relevant(low):
+            key = (message.id, hash(raw))
+            if key not in self._unrecognized_seen:
+                self._unrecognized_seen.add(key)
+                await self.tg_logger.log(
+                    f"Пост про промо/чек, но ничего не распознано. Текст целиком:\n{raw[:500]}",
+                    error="не распознано",
+                )
+
+    @staticmethod
+    def _looks_relevant(low: str) -> bool:
+        return any(w in low for w in PROMO_KEYWORDS) or any(w in low for w in CHECK_WORDS)
+
+    # ------------------------------------------------------------------
+    def _spawn(self, coro):
+        """create_task с удержанием ссылки (иначе задачу может собрать GC) и
+        логированием необработанных исключений."""
+        task = asyncio.create_task(coro)
+        self._tasks.add(task)
+
+        def _done(t):
+            self._tasks.discard(t)
+            if not t.cancelled() and t.exception():
+                logger.error(f"[{self.label}] фоновая задача: {t.exception()!r}")
+
+        task.add_done_callback(_done)
+        return task
+
+    def submit(self, code: str):
+        """Поставить активацию кода в работу (дубли отсекаются)."""
+        key = code.lower()
+        if key in self.activated_promos or key in self.promo_in_progress:
+            return
+        self._spawn(self.activate(code))
 
     async def activate(self, code: str):
-        if code.lower() in self.activated_promos or code.lower() in self.promo_in_progress:
+        key = code.lower()
+        if key in self.activated_promos or key in self.promo_in_progress:
             return
-
-        self.promo_in_progress.add(code.lower())
+        self.promo_in_progress.add(key)
         await self.tg_logger.log(f"🚀 Активирую промокод: `{code}`")
+        outcome = RETRY
         try:
-            success = False
             for attempt in range(1, PROMO_MAX_ATTEMPTS + 1):
                 try:
-                    success = await self._attempt(code)
+                    outcome = await asyncio.wait_for(self._attempt(code), PROMO_ATTEMPT_TIMEOUT_SEC)
                 except TooManyFloodWaitsError as e:
                     await self.tg_logger.log(f"Промокод `{code}`: слишком много FloodWait", error=str(e))
+                    outcome = RETRY
                     break
-                if success:
+                except asyncio.TimeoutError:
+                    logger.warning(f"⚠️ [{self.label}] Промокод {code}: попытка #{attempt} — таймаут")
+                    outcome = RETRY
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.warning(f"⚠️ [{self.label}] Промокод {code}: попытка #{attempt} — {e!r}")
+                    outcome = RETRY
+
+                if outcome != RETRY:
                     break
                 logger.warning(f"⚠️ [{self.label}] Промокод {code}: попытка #{attempt} неудачна")
                 if attempt < PROMO_MAX_ATTEMPTS:
                     await human_delay(*PROMO_RETRY_DELAY_RANGE)
 
-            if success:
-                self.activated_promos.add(code.lower())
+            if outcome == OK:
+                self.activated_promos.add(key)
                 self.profile_stats.promos_activated_today.append(code)
                 if self.db:
                     await self.db.event("promo_activated", promo_code=code, stars=2.0)
-                if len(self.activated_promos) > 50:
-                    self.activated_promos = set(list(self.activated_promos)[-20:])
+                self._spawn(self._post_success_refresh())
+            elif outcome == REJECTED:
+                # Бот явно отказал — больше не пробуем, но и «активированным» не считаем.
+                self.activated_promos.add(key)
+                if self.db:
+                    await self.db.event("promo_failed", promo_code=code, error_reason="rejected by bot")
             else:
                 self.profile_stats.add_error(f"промо {code}: все попытки неудачны")
-                await self.tg_logger.log(f"Промокод `{code}`: все {PROMO_MAX_ATTEMPTS} попыток неудачны", error="исчерпаны попытки")
+                await self.tg_logger.log(
+                    f"Промокод `{code}`: все {PROMO_MAX_ATTEMPTS} попыток неудачны", error="исчерпаны попытки")
                 if self.db:
                     await self.db.event("promo_failed", promo_code=code, error_reason="all attempts failed")
         finally:
-            self.promo_in_progress.discard(code.lower())
+            self.promo_in_progress.discard(key)
 
-    async def _attempt(self, code: str) -> bool:
-        """Одна попытка активации. True = терминальный исход (успех ИЛИ
-        явный отказ бота типа 'неверный/просрочен') — ретраить бессмысленно."""
-        async with self.core.bot_lock.acquire(high_priority=True):
-            msg = await self.core._open_unlocked()
-            if not msg or not msg.buttons:
-                return False
+    async def _attempt(self, code: str) -> str:
+        """Одна попытка: OK / REJECTED (явный отказ бота — ретраить
+        бессмысленно) / RETRY (что-то не ответило — пробуем снова)."""
+        core = self.core
+        async with core.bot_lock.acquire(high_priority=True):
+            msg = await core._open_unlocked()
+            profile_btn = find_button(msg, ["профил", "profile"])
+            if not profile_btn:
+                return RETRY
 
-            profile_clicked = False
             since = utcnow()
-            for row in msg.buttons:
-                for btn in row:
-                    if any(w in btn.text.lower() for w in ["профил", "profile"]):
-                        await btn.click()
-                        profile_clicked = True
-                        break
-                if profile_clicked:
-                    break
-            if not profile_clicked:
-                return False
+            await core.click_button(profile_btn)
+            # Ждём именно экран, где есть кнопка «Промокод» (а не любое сообщение).
+            msg = await core.wait_fresh(
+                since, timeout=6, fallback=False,
+                predicate=lambda m: find_button(m, ["промо"]) is not None,
+            )
+            promo_btn = find_button(msg, ["промо"])
+            if not promo_btn:
+                return RETRY
 
-            msg = await self.core.wait_fresh(since, timeout=8)
-            if not msg or not msg.buttons:
-                return False
-
-            promo_clicked = False
             since = utcnow()
-            for row in msg.buttons:
-                for btn in row:
-                    if "промо" in btn.text.lower():
-                        await btn.click()
-                        promo_clicked = True
-                        break
-                if promo_clicked:
-                    break
-            if not promo_clicked:
-                return False
-
-            msg2 = await self.core.wait_fresh(since, timeout=8)
-            if not msg2:
-                return False
+            await core.click_button(promo_btn)
+            prompt = await core.wait_fresh(since, timeout=6, fallback=False)
+            if not prompt:
+                return RETRY
 
             since = utcnow()
             await safe_call(lambda: self.client.send_message(TARGET_BOT, code), action="send_promo_code")
-            resp = await self.core.wait_fresh(since, timeout=8)
+            resp = await core.wait_fresh(since, timeout=8, fallback=False)
             if not resp:
-                return False
+                return RETRY
 
             resp_text = resp.text or ""
-
             if any(w in resp_text.lower() for w in PROMO_REJECT_KEYWORDS):
                 await self.tg_logger.log(f"Промокод `{code}` отклонён ботом: {resp_text[:150]}", error="отклонён")
-                return True  # терминально — повторять бессмысленно
+                return REJECTED
 
-            if resp.buttons:
-                for r in resp.buttons:
-                    for b in r:
-                        url = getattr(b, 'url', None)
-                        b_text = b.text.lower()
-                        if url:
-                            tme = re.search(r't\.me/(\+?[a-zA-Z0-9_]+)', url)
-                            if tme and not tme.group(1).lower().endswith('bot'):
-                                await self.core.safe_join(tme.group(1))
-                        if any(w in b_text for w in ["подписал", "проверить", "готово", "я подписал", "check"]):
-                            await human_delay(2, 3)
-                            await b.click()
-
+            await self._satisfy_sponsor_buttons(resp)
             await self.tg_logger.log(f"✅ Промокод `{code}` активирован!\n📩 {resp_text[:100]}")
+            return OK
 
-            # Обновляем реальный баланс из профиля после успеха.
-            # ВАЖНО: лок уже взят этим же async with выше — self.core.open_bot()
-            # тоже берёт лок и НЕ реентерабелен, вызов был бы самодедлоком
-            # (бот бы навсегда завис после первого успешного промокода).
-            # Поэтому здесь строго _open_unlocked(), а не open_bot().
-            profile_msg = await self.core._open_unlocked()
-            await self._refresh_balance(profile_msg)
-            return True
-
-    async def _refresh_balance(self, msg):
-        if not msg or not msg.buttons:
+    async def _satisfy_sponsor_buttons(self, resp):
+        """Если бот просит подписаться на спонсоров — вступаем и жмём проверку."""
+        import re
+        if not resp.buttons:
             return
-        for row in msg.buttons:
-            for btn in row:
-                if any(w in btn.text.lower() for w in ["профил", "profile"]):
-                    since = utcnow()
-                    await btn.click()
-                    resp = await self.core.wait_fresh(since, timeout=6)
-                    if resp:
-                        await self.profile_stats.update_from_profile_text(resp.text or "")
+        for row in resp.buttons:
+            for b in row:
+                url = getattr(b, "url", None)
+                b_text = b.text.lower()
+                if url:
+                    tme = re.search(r"t\.me/(\+?[a-zA-Z0-9_]+)", url)
+                    if tme and not tme.group(1).lower().endswith("bot"):
+                        await self.core.safe_join(tme.group(1))
+                if any(w in b_text for w in ["подписал", "проверить", "готово", "я подписал", "check"]):
+                    await human_delay(2, 3)
+                    await self.core.click_button(b)
+
+    async def _post_success_refresh(self):
+        """Обновляем реальный баланс ПОСЛЕ активации и вне горячего пути
+        (раньше это делалось внутри лока и задерживало следующий код)."""
+        try:
+            async with self.core.bot_lock.acquire():
+                msg = await self.core._open_unlocked()
+                btn = find_button(msg, ["профил", "profile"])
+                if not btn:
                     return
+                since = utcnow()
+                await self.core.click_button(btn)
+                resp = await self.core.wait_fresh(since, timeout=6)
+                if resp:
+                    await self.profile_stats.update_from_profile_text(resp.text or "")
+        except Exception as e:
+            logger.warning(f"[{self.label}] обновление баланса после промо: {e!r}")
