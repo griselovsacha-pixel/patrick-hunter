@@ -1,7 +1,7 @@
 """
 BioManager — когда ежедневка просит "поставь свою личную ссылку в описание
 профиля, чтобы получать бонус", этот модуль сам:
-  1. ставит REFERRAL_LINK в About (описание) аккаунта;
+  1. ставит личную реф. ссылку аккаунта (config.referral_link_for) в About (описание) аккаунта;
   2. пытается открыть приватность "Био" на "видно всем" (иначе бот бота не
      увидит и бонус не засчитает).
 
@@ -16,7 +16,7 @@ import logging
 from telethon.tl.functions.account import UpdateProfileRequest, SetPrivacyRequest
 from telethon.tl import types
 
-from config import REFERRAL_LINK
+from config import referral_link_for
 from antiban import safe_call
 
 logger = logging.getLogger(__name__)
@@ -28,6 +28,8 @@ class BioManager:
         self.tg_logger = tg_logger
         self.label = label
         self._bio_already_set = False
+        digits = "".join(ch for ch in label if ch.isdigit())
+        self.referral_link = referral_link_for(int(digits or "1"))
 
     async def ensure_referral_bio(self):
         """Идемпотентно: если уже проставляли в этом запуске процесса —
@@ -36,12 +38,12 @@ class BioManager:
             return True
         try:
             await safe_call(
-                lambda: self.client(UpdateProfileRequest(about=REFERRAL_LINK)),
+                lambda: self.client(UpdateProfileRequest(about=self.referral_link)),
                 action="update_bio",
             )
             await self._make_bio_public()
             self._bio_already_set = True
-            await self.tg_logger.log(f"📝 Реф. ссылка проставлена в описание профиля: {REFERRAL_LINK}")
+            await self.tg_logger.log(f"📝 Реф. ссылка проставлена в описание профиля: {self.referral_link}")
             return True
         except Exception as e:
             await self.tg_logger.log("📝 Не удалось проставить реф. ссылку в описание", error=str(e))
