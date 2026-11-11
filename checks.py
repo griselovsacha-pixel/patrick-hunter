@@ -15,13 +15,12 @@ CheckHunter — чеки и deep-link'и из постов канала.
 import asyncio
 import datetime
 import logging
-import re
 from contextlib import AsyncExitStack
 
 from telethon.tl.functions.messages import StartBotRequest
 
 from config import CHECK_BOTS, TARGET_BOT, PROMO_KEYWORDS, PROMO_REJECT_KEYWORDS
-from utils import BoundedSet, find_button, human_delay
+from utils import BoundedSet, find_button, human_delay, parse_tme_target
 from antiban import safe_call, TooManyFloodWaitsError
 from core import utcnow
 
@@ -189,10 +188,10 @@ class CheckHunter:
             for b in row:
                 url = getattr(b, "url", None)
                 if url:
-                    tme = re.search(r"t\.me/(\+?[a-zA-Z0-9_]+)", url)
-                    if tme and not tme.group(1).lower().endswith("bot"):
-                        await self.core.safe_join(tme.group(1))
-                        joined = True
+                    t = parse_tme_target(url)
+                    if t and t["kind"] in ("channel", "invite"):
+                        status = await self.core.safe_join(t["target"])
+                        joined = joined or status in ("ok", "already")
         confirm = find_button(reply, ["подпис", "провер", "check", "готов", "я подписал"])
         if not (joined and confirm):
             return text, outcome
