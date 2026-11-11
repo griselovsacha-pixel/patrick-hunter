@@ -15,14 +15,33 @@ from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.functions.messages import ImportChatInviteRequest, StartBotRequest
 from telethon.tl.functions.folders import EditPeerFoldersRequest
 from telethon.tl.types import InputFolderPeer
-from telethon.errors import UserAlreadyParticipantError, InviteHashInvalidError
+import telethon.errors as _tgerr
 
 from config import TARGET_BOT, CONFIRM_WORDS, MINIAPP_REAL_OPEN
 from miniapp import MiniAppRunner, parse_app_link
-from utils import looks_like_sponsor_gate, human_delay
+from utils import (
+    looks_like_sponsor_gate, human_delay, is_webapp_button, parse_tme_target,
+    classify_task_alert,
+)
 from antiban import safe_call
 
 logger = logging.getLogger(__name__)
+
+
+def _err(name: str):
+    """Класс ошибки Telethon по имени; если в этой версии его нет — заглушка
+    (чтобы отсутствие одного класса не роняло импорт всего приложения)."""
+    return getattr(_tgerr, name, type(name, (Exception,), {}))
+
+
+UserAlreadyParticipantError = _err("UserAlreadyParticipantError")
+InviteHashInvalidError = _err("InviteHashInvalidError")
+InviteHashExpiredError = _err("InviteHashExpiredError")
+InviteRequestSentError = _err("InviteRequestSentError")
+ChannelsTooMuchError = _err("ChannelsTooMuchError")
+UsernameNotOccupiedError = _err("UsernameNotOccupiedError")
+UsernameInvalidError = _err("UsernameInvalidError")
+ChannelPrivateError = _err("ChannelPrivateError")
 
 
 def utcnow():
@@ -41,6 +60,11 @@ class BotCore:
         # (событийного) ожидания ответа вместо опроса истории раз в 1.5с.
         # Заполняется из account.py через register_bot_dm_handler().
         self.bot_msg_queue: asyncio.Queue = asyncio.Queue(maxsize=30)
+
+        # Связка кликер <-> задания: кликер просит внеочередной цикл заданий
+        # (tasks_wanted), а после цикла задания сообщают об этом (tasks_cycle_done).
+        self.tasks_wanted = asyncio.Event()
+        self.tasks_cycle_done = asyncio.Event()
 
         # Настоящий запуск мини-аппов (WebView + keepalive + обработчики).
         self.miniapp = MiniAppRunner(client, self, tg_logger, label)
@@ -196,21 +220,55 @@ class BotCore:
         except Exception as e:
             logger.warning(f"⚠️ [{self.label}] Не удалось архивировать {entity}: {e}")
 
-    async def safe_join(self, target: str):
+    async def safe_join(self, target: str) -> str:
+        """Вступить в канал/чат. Возвращает статус, а не молча глотает ошибки
+        (раньше провал вступления всё равно логировался как «подписался»):
+        'ok' | 'already' | 'request' (нужно одобрение) | 'expired' | 'invalid' |
+        'limit' (слишком много каналов) | 'error'."""
+        status = "ok"
         try:
             if target.startswith('+'):
                 await safe_call(lambda: self.client(ImportChatInviteRequest(target[1:])), action="join_invite")
             else:
                 await safe_call(lambda: self.client(JoinChannelRequest(target)), action="join_channel")
-            await human_delay(2, 4)
-            await self.archive_chat(target)
-            await human_delay(2, 4)
         except UserAlreadyParticipantError:
-            await self.archive_chat(target)
-        except InviteHashInvalidError:
-            logger.warning(f"⚠️ [{self.label}] Невалидный инвайт: {target}")
+            status = "already"
+        except InviteRequestSentError:
+            status = "request"
+        except InviteHashExpiredError:
+            status = "expired"
+        except (InviteHashInvalidError, UsernameNotOccupiedError, UsernameInvalidError, ChannelPrivateError):
+            status = "invalid"
+        except ChannelsTooMuchError:
+            status = "limit"
         except Exception as e:
+            status = "error"
             logger.error(f"[{self.label}] Ошибка вступления {target}: {e}")
+
+        if status != "ok":
+            logger.warning(f"⚠️ [{self.label}] Вступление {target}: {status}")
+        if status in ("ok", "already"):
+            if status == "ok":
+                await human_delay(2, 4)
+            await self.archive_chat(target)
+            if status == "ok":
+                await human_delay(2, 4)
+        return status
+
+    async def start_bot(self, target: str, payload=None) -> bool:
+        """Запустить стороннего бота как по ссылке t.me/bot?start=payload
+        (раньше payload терялся и слался голый /start). Сам TARGET_BOT не
+        трогаем: он уже запущен, а лишний /start сбивает диалог заданий."""
+        if target.lower() == TARGET_BOT.lower():
+            return True
+        cmd = f"/start {payload}" if payload else "/start"
+        try:
+            await safe_call(lambda: self.client.send_message(target, cmd), action="task_start_bot")
+            await self.archive_chat(target)
+            return True
+        except Exception as e:
+            logger.warning(f"⚠️ [{self.label}] Запуск бота @{target}: {e}")
+            return False
 
     async def handle_startapp(self, url: str) -> bool:
         """Открыть мини-апп по ссылке t.me/bot[/app]?startapp=... .
@@ -262,34 +320,55 @@ class BotCore:
         await self.tg_logger.log(f"🚧 Гейт спонсоров: {(msg.text or '')[:150]}")
 
         confirm_btn = None
-        joined = 0
+        joined, bots, unsupported = 0, 0, 0
+        failed = []
         for row in msg.buttons:
             for btn in row:
                 btn_text = btn.text.lower()
                 if any(w in btn_text for w in CONFIRM_WORDS):
                     confirm_btn = btn
                     continue
+                if is_webapp_button(btn):
+                    unsupported += 1  # мини-апп спонсора (Flyer и т.п.) — без обработчика не засчитать
+                    continue
                 url = getattr(btn, 'url', None)
-                if url:
-                    tme_match = re.search(r't\.me/(\+?[a-zA-Z0-9_]+)', url)
-                    if tme_match:
-                        target = tme_match.group(1)
-                        if not target.lower().endswith('bot'):
-                            await self.safe_join(target)
-                            joined += 1
+                if not url:
+                    continue
+                t = parse_tme_target(url)
+                if not t or t["kind"] == "app":
+                    unsupported += 1
+                elif t["kind"] in ("channel", "invite"):
+                    status = await self.safe_join(t["target"])
+                    if status in ("ok", "already"):
+                        joined += 1
+                    else:
+                        failed.append(f"{t['target'][:14]}:{status}")
+                elif t["kind"] == "bot":
+                    if await self.start_bot(t["target"], t["start"]):
+                        bots += 1
 
         if not confirm_btn:
             await self.tg_logger.log("Гейт спонсоров: кнопка подтверждения не найдена", error="нет кнопки")
             return msg
 
+        summary = f"каналов {joined}, ботов {bots}"
+        if failed:
+            summary += f", не удалось {len(failed)} ({', '.join(failed)[:80]})"
+        if unsupported:
+            summary += f", ссылок/мини-аппов без обработки {unsupported}"
+
         await human_delay(4, 8)
         since = utcnow()
-        try:
-            await confirm_btn.click()
-            await self.tg_logger.log(f"✅ Гейт спонсоров пройден, подписался на {joined} каналов")
-        except Exception as e:
-            await self.tg_logger.log("Гейт спонсоров: ошибка подтверждения", error=str(e))
-            return msg
+        alert, _ = await self.click_button(confirm_btn)
+        verdict = classify_task_alert(alert) if alert else "unknown"
+        if verdict == "fail":
+            await self.tg_logger.log(
+                f"⚠️ Гейт спонсоров НЕ пройден ({summary}): {alert[:100]}", error="гейт не пройден")
+        elif verdict == "ok":
+            await self.tg_logger.log(f"✅ Гейт спонсоров пройден ({summary}): {alert[:80]}")
+        else:
+            await self.tg_logger.log(f"🚧 Гейт спонсоров: кнопка нажата ({summary}), ответ бота не распознан"
+                                     + (f": {alert[:80]}" if alert else ""))
 
         return await self.wait_fresh(since, timeout=8)
 
