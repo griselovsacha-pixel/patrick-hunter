@@ -12,7 +12,7 @@ from config import (
     TIMEZONE_OFFSET, CLICKER_MIN_PER_DAY, CLICKER_MAX_PER_DAY,
     CLICKER_START_HOUR, CLICKER_END_HOUR, TARGET_BOT,
 )
-from utils import human_delay
+from utils import human_delay, classify_click_alert, parse_cooldown_seconds
 from core import utcnow
 
 logger = logging.getLogger(__name__)
@@ -27,6 +27,7 @@ class Clicker:
         self.label = label
         self.db = db
         self.target_today = 0
+        self.on_gate = None  # callable: просьба к TaskRunner выполнить задания (см. account.py)
 
     def _now_local(self):
         return datetime.datetime.utcnow() + datetime.timedelta(hours=TIMEZONE_OFFSET)
@@ -62,17 +63,13 @@ class Clicker:
                 for i, click_time in enumerate(click_times):
                     now = self._now_local()
                     if click_time <= now:
-                        # Пропущенный слот (например, сервис перезапустился
-                        # посреди дня на Render) — раньше он тут просто
-                        # молча терялся (continue), и реальное число кликов
-                        # за день оказывалось меньше 27-30. Теперь нагоняем
-                        # сразу, с небольшой случайной паузой между
-                        # пропущенными кликами, чтобы не бить их все разом.
+                        # Пропущенный слот (сервис перезапустился посреди дня на Render) —
+                        # нагоняем, небольшими паузами. Кулдаун между кликами у бота
+                        # ~6 минут, поэтому _click_slot сам ждёт его, а не сжигает слоты.
                         await asyncio.sleep(random.uniform(3, 15))
-                        await self._do_one_click(i + 1, times_today)
-                        continue
-                    await asyncio.sleep((click_time - now).total_seconds())
-                    await self._do_one_click(i + 1, times_today)
+                    else:
+                        await asyncio.sleep((click_time - now).total_seconds())
+                    await self._click_slot(i + 1, times_today)
 
                 now = self._now_local()
                 tomorrow_8 = (now + datetime.timedelta(days=1)).replace(
@@ -83,67 +80,105 @@ class Clicker:
                 logger.error(f"[{self.label}] Ошибка кликера: {e}")
                 await asyncio.sleep(3600)
 
+    async def _click_slot(self, index: int, total: int):
+        """Один слот: клик + ожидание кулдауна / выполнение заданий и одна повторная попытка."""
+        status, wait = await self._do_one_click(index, total)
+        if status == "cooldown" and 0 < wait <= 900:
+            await asyncio.sleep(wait + random.uniform(5, 25))
+            status, wait = await self._do_one_click(index, total)
+        elif status == "gate":
+            await self._wait_for_tasks()
+            status, wait = await self._do_one_click(index, total)
+        return status
+
+    async def _wait_for_tasks(self):
+        """Бот не даёт кликать, пока не выполнены задания: просим TaskRunner запустить
+        цикл сейчас и ждём его конца (не дольше 40 минут). Лок бота тут НЕ держим."""
+        requested = False
+        if self.on_gate:
+            try:
+                requested = self.on_gate("клик: бот просит выполнить задания")
+            except Exception as e:
+                logger.warning(f"[{self.label}] on_gate: {e}")
+        if not requested:
+            await self.tg_logger.log("🎮 Задания запускались недавно — клик повторю после паузы")
+            await asyncio.sleep(random.uniform(120, 240))
+            return
+        try:
+            await asyncio.wait_for(self.core.tasks_cycle_done.wait(), 2400)
+        except asyncio.TimeoutError:
+            pass
+        await human_delay(5, 12)
+
     async def _do_one_click(self, index: int, total: int):
+        """-> (status, wait_sec). status: 'ok' | 'cooldown' | 'gate' | 'nobtn' | 'error' | 'unknown'.
+
+        Раньше ЛЮБОЕ всплывающее окно логировалось как «кулдаун» и клик не
+        засчитывался: успешный клик («✅ Ты получил(а) 0.10 ⭐️») не попадал ни в
+        статистику, ни в БД. Теперь окно классифицируется (utils.classify_click_alert)."""
         try:
             async with self.core.bot_lock.acquire():
-                since = utcnow()
-                await self.client.send_message(self._target_bot(), '/start')
-                msg = await self.core.wait_fresh(since, timeout=8)
+                # _open_unlocked сам решает капчу и проходит гейт спонсоров
+                msg = await self.core._open_unlocked()
                 if not msg or not msg.buttons:
                     await self.tg_logger.log(f"🎮 Клик #{index}/{total}: бот не ответил на /start", error="нет ответа")
-                    return
-
-                if "проверка" in (msg.text or "").lower():
-                    if not await self.core.captcha.solve_if_needed(msg):
-                        await self.tg_logger.log(f"🎮 Клик #{index}/{total}: капча не решена", error="капча")
-                        return
-                    since = utcnow()
-                    msg = await self.core.wait_fresh(since, timeout=6)
+                    return "error", 0
 
                 clicker_btn = None
-                if msg and msg.buttons:
-                    for row in msg.buttons:
-                        for btn in row:
-                            if any(w in btn.text.lower() for w in ["кликер", "clicker", "farm", "✨"]):
-                                clicker_btn = btn
-                                break
-                        if clicker_btn:
+                for row in msg.buttons:
+                    for btn in row:
+                        if any(w in btn.text.lower() for w in ["кликер", "clicker", "farm", "✨"]):
+                            clicker_btn = btn
                             break
+                    if clicker_btn:
+                        break
 
                 if not clicker_btn:
-                    await self.tg_logger.log(f"🎮 Клик #{index}/{total}: кнопка кликера не найдена", error="нет кнопки")
-                    return
+                    labels = " | ".join(b.text for row in msg.buttons for b in row)[:120]
+                    await self.tg_logger.log(
+                        f"🎮 Клик #{index}/{total}: кнопка кликера не найдена\n🧾 {(msg.text or '')[:60]}\n🔘 {labels}",
+                        error="нет кнопки")
+                    return "nobtn", 0
 
-                # ТОТ ЖЕ ФИКС, что и в daily.py: бот может ответить на клик
-                # через всплывающее окно (кулдаун), а не новым сообщением.
-                # Раньше это игнорировалось — клик считался "успешным" по
-                # факту нажатия, даже если реально бот отказал по кулдауну.
-                # Именно это и выглядело как "клики не работают" — они
-                # реально не засчитывались, но код бодро писал bы "собран".
+                since = utcnow()
                 alert_text, _ = await self.core.click_button(clicker_btn)
 
                 if alert_text:
-                    await self.tg_logger.log(f"🎮 Клик #{index}/{total}: кулдаун — {alert_text}")
-                    return  # не засчитываем клик — бот его не принял
-
-                resp = await self.core.wait_fresh(since, timeout=6)
-                if resp and "проверка" in (resp.text or "").lower():
-                    if await self.core.captcha.solve_if_needed(resp):
-                        since = utcnow()
-                        resp = await self.core.wait_fresh(since, timeout=6)
+                    kind = classify_click_alert(alert_text)
+                    if kind == "cooldown":
+                        wait = parse_cooldown_seconds(alert_text)
+                        await self.tg_logger.log(f"🎮 Клик #{index}/{total}: кулдаун — {alert_text}")
+                        return "cooldown", wait
+                    if kind == "gate":
+                        await self.tg_logger.log(f"🎮 Клик #{index}/{total}: бот просит выполнить задания — {alert_text}")
+                        return "gate", 0
+                    if kind != "ok":
+                        await self.tg_logger.log(f"🎮 Клик #{index}/{total}: непонятный ответ бота — {alert_text}")
+                        return "unknown", 0
+                    # kind == "ok" — клик засчитан, идём дальше
+                else:
+                    resp = await self.core.wait_fresh(since, timeout=6)
+                    if resp and "проверка" in (resp.text or "").lower():
+                        if await self.core.captcha.solve_if_needed(resp):
+                            await self.core.wait_fresh(utcnow(), timeout=6)
 
                 self.profile_stats.clicker_clicks_today += 1
                 if self.db:
                     await self.db.event("click", stars=0.10)
-                await self.tg_logger.log(f"🎮 Клик #{index}/{total} собран")
+                await self.tg_logger.log(
+                    f"🎮 Клик #{index}/{total} засчитан" + (f": {alert_text}" if alert_text else ""))
 
                 if self.profile_stats.clicker_clicks_today % 10 == 0:
                     await self._refresh_balance()
+                return "ok", 0
 
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.error(f"[{self.label}] Ошибка клика #{index}: {e}")
             self.profile_stats.add_error(f"кликер#{index}: {str(e)[:40]}")
             await self.tg_logger.log(f"🎮 Клик #{index}/{total}: исключение", error=str(e))
+            return "error", 0
 
     def _target_bot(self):
         return TARGET_BOT
