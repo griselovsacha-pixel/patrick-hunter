@@ -23,7 +23,7 @@ from config import (
     TARGET_BOT, PROMO_KEYWORDS, PROMO_REJECT_KEYWORDS,
     PROMO_MAX_ATTEMPTS, PROMO_RETRY_DELAY_RANGE,
 )
-from utils import find_promo_in_text, extract_start_links, find_button, human_delay, BoundedSet
+from utils import find_promo_in_text, extract_start_links, find_button, human_delay, BoundedSet, parse_tme_target
 from antiban import safe_call, TooManyFloodWaitsError
 from core import utcnow
 from checks import CHECK_WORDS
@@ -211,7 +211,6 @@ class PromoHunter:
 
     async def _satisfy_sponsor_buttons(self, resp):
         """Если бот просит подписаться на спонсоров — вступаем и жмём проверку."""
-        import re
         if not resp.buttons:
             return
         for row in resp.buttons:
@@ -219,9 +218,9 @@ class PromoHunter:
                 url = getattr(b, "url", None)
                 b_text = b.text.lower()
                 if url:
-                    tme = re.search(r"t\.me/(\+?[a-zA-Z0-9_]+)", url)
-                    if tme and not tme.group(1).lower().endswith("bot"):
-                        await self.core.safe_join(tme.group(1))
+                    t = parse_tme_target(url)
+                    if t and t["kind"] in ("channel", "invite"):
+                        await self.core.safe_join(t["target"])
                 if any(w in b_text for w in ["подписал", "проверить", "готово", "я подписал", "check"]):
                     await human_delay(2, 3)
                     await self.core.click_button(b)
