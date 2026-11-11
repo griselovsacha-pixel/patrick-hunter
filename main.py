@@ -23,6 +23,8 @@ from config import load_account_sessions, ACCOUNT_START_STAGGER_SEC
 from account import PatrickAccount
 from hub import Hub
 from memguard import memory_guard_cycle, rss_mb
+from supabase_db import supabase_headers
+import db_migrate
 
 logging.basicConfig(
     level=logging.INFO,
@@ -119,9 +121,22 @@ async def lifespan(app: FastAPI):
 
     sessions = load_account_sessions()
 
+    # БД: создать недостающие таблицы/колонки и строки accounts ДО старта аккаунтов.
+    # Любая ошибка БД не должна мешать старту бота/HTTP.
+    account_numbers = [
+        int("".join(ch for ch in label if ch.isdigit()) or "1") for label, _ in sessions
+    ]
+    try:
+        await asyncio.wait_for(db_migrate.ensure_schema(account_numbers), timeout=60)
+    except Exception as e:
+        logger.error("DB: автонастройка не выполнена: %s", e)
+    _background_tasks.append(asyncio.create_task(db_migrate.maintenance_loop()))
+
     if not sessions:
         logger.warning("⚠️ Telegram sessions не найдены")
         yield
+        for task in _background_tasks:
+            task.cancel()
         return
 
     accounts = [
@@ -251,11 +266,7 @@ async def supabase_get(
             ),
         )
 
-    headers = {
-        "apikey": service_key,
-        "Authorization":
-            f"Bearer {service_key}",
-    }
+    headers = supabase_headers(service_key)
 
     url = (
         supabase_url.rstrip("/")
