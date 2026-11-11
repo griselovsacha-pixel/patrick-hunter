@@ -20,6 +20,8 @@ from config import (
     TIMEZONE_OFFSET,
     WATCH_CHANNELS,
     TASK_START_STAGGER_SEC,
+    TASK_INTERVAL_MIN_SEC,
+    TASK_INTERVAL_MAX_SEC,
 )
 from priority_lock import PriorityLock
 from tg_logger import TgLogger
@@ -84,6 +86,9 @@ class PatrickAccount:
             self.client, self.core, self.tg_logger, self.profile_stats, label, self.db,
         )
 
+        # Кликер просит внеочередной цикл заданий, когда бот пишет «выполни задание»
+        self.clicker.on_gate = self.tasks.request_run
+
         self._background_tasks = []
         self._bot_dm_handler = None
 
@@ -114,7 +119,7 @@ class PatrickAccount:
         await self.tg_logger.log(
             "🤖 Бот запущен!\n"
             "📅 Ежедневка: по времени бота\n"
-            "📋 Задания: каждые ~2ч15м-3ч45м\n"
+            f"📋 Задания: каждые ~{TASK_INTERVAL_MIN_SEC // 60}-{TASK_INTERVAL_MAX_SEC // 60} мин и по запросу кликера\n"
             "🔔 Промокоды и чеки: события + опрос канала каждые несколько секунд\n"
             "🎮 Кликер: рандом раз в день, окно 8:00-00:00\n"
             "💰 Баланс: читается из Профиля бота\n"
