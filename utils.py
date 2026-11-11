@@ -9,6 +9,12 @@ from collections import OrderedDict
 
 from config import PROMO_KEYWORDS, IGNORED_WORDS, CONFIRM_WORDS, SPONSOR_GATE_HINTS, BIO_LINK_HINTS
 from config import TASK_INTERVAL_MIN_SEC, TASK_INTERVAL_MAX_SEC
+from config import (
+    TASK_MARKERS, TASK_FAIL_WORDS, TASK_OK_WORDS,
+    CLICK_OK_WORDS, CLICK_COOLDOWN_WORDS, CLICK_GATE_WORDS,
+)
+import hashlib
+from urllib.parse import parse_qsl
 
 
 async def human_delay(min_sec: float = 2.0, max_sec: float = 4.0):
@@ -222,8 +228,8 @@ def looks_like_sponsor_gate(msg) -> bool:
             btn_text = btn.text.lower()
             if any(w in btn_text for w in CONFIRM_WORDS):
                 has_confirm = True
-            if getattr(btn, 'url', None):
-                has_link = True
+            if getattr(btn, 'url', None) or is_webapp_button(btn):
+                has_link = True  # ссылка на спонсора ИЛИ мини-апп (Flyer и т.п.)
 
     return has_confirm and has_link
 
@@ -274,3 +280,103 @@ def parse_profile_text(text: str) -> dict:
         result['username'] = username_m.group(1)
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Разбор ссылок t.me, сообщений-заданий и ответов бота
+# ---------------------------------------------------------------------------
+_TME_RE = re.compile(r'(?:https?://)?(?:www\.)?(?:t\.me|telegram\.me)/([^\s?#]+)(?:\?([^\s#]*))?', re.IGNORECASE)
+_TME_SERVICE = {
+    "c", "addstickers", "addemoji", "share", "proxy", "socks", "login", "boost",
+    "setlanguage", "addtheme", "iv", "invoice", "giftcode", "m", "contact",
+    "addlist", "confirmphone", "bg",
+}
+
+
+def parse_tme_target(url: str):
+    """Разбор ссылки t.me -> {'kind', 'target', 'start'} или None.
+
+    kind: 'invite' (target='+HASH'), 'channel' (публичный username),
+          'bot' (start — payload из ?start=), 'app' (мини-апп, start — startapp).
+
+    ВАЖНО: инвайт-хэш может содержать '-' и '_'. Раньше регэксп [a-zA-Z0-9_]
+    обрезал его по первому '-' (получалось «+RfN») — вступление падало с
+    «chat has expired», а в логе всё равно писалось «подписался»."""
+    m = _TME_RE.search(url or "")
+    if not m:
+        return None
+    parts = [p for p in m.group(1).split("/") if p]
+    if not parts:
+        return None
+    params = dict(parse_qsl(m.group(2) or "", keep_blank_values=True))
+    first = parts[0]
+
+    if first.lower() == "joinchat" and len(parts) > 1:
+        return {"kind": "invite", "target": "+" + parts[1], "start": None}
+    if first.startswith("+"):
+        if re.fullmatch(r"\+[A-Za-z0-9_\-]{6,}", first) and not first[1:].isdigit():  # +7999... - телефон, не инвайт
+            return {"kind": "invite", "target": first, "start": None}
+        return None
+    if first.lower() in _TME_SERVICE:
+        return None
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{3,31}", first):
+        return None
+    if first.lower().endswith("bot"):
+        if "startapp" in params or (len(parts) > 1 and not parts[1].isdigit()):
+            return {"kind": "app", "target": first, "start": params.get("startapp")}
+        return {"kind": "bot", "target": first, "start": params.get("start")}
+    return {"kind": "channel", "target": first, "start": None}
+
+
+def is_task_message(msg) -> bool:
+    """Сообщение бота — именно ЗАДАНИЕ (а не меню/профиль/поздравление)."""
+    low = (getattr(msg, "text", None) or "").lower()
+    return any(m in low for m in TASK_MARKERS)
+
+
+def parse_reward(text: str):
+    m = re.search(r'награда:?\s*\**\s*(\d+(?:[.,]\d+)?)', (text or "").lower())
+    return float(m.group(1).replace(",", ".")) if m else None
+
+
+def classify_task_alert(text) -> str:
+    """Ответ бота на «Проверить»: 'ok' | 'fail' | 'unknown'. Провал проверяем
+    первым: «❌ Задание не выполнено» содержит слово «выполнено»."""
+    low = (text or "").lower()
+    if not low:
+        return "unknown"
+    if any(w in low for w in TASK_FAIL_WORDS):
+        return "fail"
+    if any(w in low for w in TASK_OK_WORDS):
+        return "ok"
+    return "unknown"
+
+
+def classify_click_alert(text) -> str:
+    """Всплывающее окно кликера: 'cooldown' | 'gate' | 'ok' | 'unknown'."""
+    low = (text or "").lower()
+    if any(w in low for w in CLICK_COOLDOWN_WORDS):
+        return "cooldown"
+    if "задани" in low and any(w in low for w in CLICK_GATE_WORDS):
+        return "gate"
+    if any(w in low for w in CLICK_OK_WORDS):
+        return "ok"
+    return "unknown"
+
+
+def parse_cooldown_seconds(text: str) -> int:
+    """'Подожди 05:10 перед следующим кликом' -> 310. Нет времени -> 0."""
+    m = re.search(r'(\d{1,2}):(\d{2})', text or "")
+    return int(m.group(1)) * 60 + int(m.group(2)) if m else 0
+
+
+def message_signature(msg) -> tuple:
+    """Отпечаток сообщения-задания: id + текст + кнопки. Бот часто РЕДАКТИРУЕТ
+    одно сообщение в следующее задание, поэтому сравнивать по одному id нельзя
+    (раньше новое задание принималось за «зациклилось» и пропускалось вслепую)."""
+    btns = []
+    for row in (getattr(msg, "buttons", None) or []):
+        for b in row:
+            btns.append((b.text, getattr(b, "url", None), getattr(b, "data", None)))
+    h = hashlib.md5(((getattr(msg, "text", None) or "") + repr(btns)).encode("utf-8", "ignore")).hexdigest()[:12]
+    return (getattr(msg, "id", None), h)
