@@ -33,6 +33,7 @@ from utils import (
     is_webapp_button, human_delay, random_task_interval, parse_tme_target,
     is_task_message, parse_reward, classify_task_alert, message_signature,
     find_button,
+    find_button_by_data,
 )
 from core import utcnow
 
@@ -81,7 +82,7 @@ class TaskRunner:
     # Одно задание
     # ------------------------------------------------------------------
     async def _click_skip(self, msg) -> bool:
-        btn = find_button(msg, ["пропустить"])
+        btn = find_button(msg, ["пропустить"]) or find_button_by_data(msg, ("skip_task:",))
         if not btn:
             return False
         try:
@@ -183,7 +184,7 @@ class TaskRunner:
 
     async def _confirm(self, task_msg, did_something: bool):
         """Нажимает «Проверить» и читает ответ бота. -> (verdict, alert_text, had_button)."""
-        btn = find_button(task_msg, CONFIRM_WORDS)
+        btn = find_button(task_msg, CONFIRM_WORDS) or find_button_by_data(task_msg, ("task:",))
         if not btn:
             return "unknown", "", False
 
@@ -196,7 +197,7 @@ class TaskRunner:
             await self.core.yield_sleep(6, 10)
             cur = await self._refetch(task_msg)
             if (cur.text or "") == (task_msg.text or ""):  # задание не сменилось
-                btn2 = find_button(cur, CONFIRM_WORDS)
+                btn2 = find_button(cur, CONFIRM_WORDS) or find_button_by_data(cur, ("task:",))
                 if btn2:
                     since = utcnow()
                     alert2, _ = await self.core.click_button(btn2)
@@ -328,7 +329,7 @@ class TaskRunner:
                 await self.tg_logger.log("Бот не ответил на /start", error="нет ответа")
                 return random.uniform(*TASK_STUCK_RETRY_RANGE)
 
-            btn = find_button(msg, ["задани"])
+            btn = find_button(msg, ["задани"]) or find_button_by_data(msg, exact=("tasks",))
             if not btn:
                 labels = " | ".join(b.text for row in msg.buttons for b in row)[:140]
                 await self.tg_logger.log(
