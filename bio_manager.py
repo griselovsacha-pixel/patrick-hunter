@@ -31,10 +31,12 @@ class BioManager:
         digits = "".join(ch for ch in label if ch.isdigit())
         self.referral_link = referral_link_for(int(digits or "1"))
 
-    async def ensure_referral_bio(self):
-        """Идемпотентно: если уже проставляли в этом запуске процесса —
-        не дёргаем API повторно."""
-        if self._bio_already_set:
+    async def ensure_referral_bio(self, force: bool = False):
+        """Проставить реф. ссылку в описание. force=True — бот только что пожаловался
+        на отсутствие ссылки: перепроверяем фактическое описание и ставим заново
+        (раньше флаг _bio_already_set блокировал повтор, и цикл «поставил → бот
+        снова просит» шёл бесконечно, хотя в профиле ссылки уже могло не быть)."""
+        if self._bio_already_set and not force:
             return True
         try:
             await safe_call(
@@ -42,12 +44,28 @@ class BioManager:
                 action="update_bio",
             )
             await self._make_bio_public()
-            self._bio_already_set = True
-            await self.tg_logger.log(f"📝 Реф. ссылка проставлена в описание профиля: {self.referral_link}")
-            return True
+            actual = await self._read_bio()
+            self._bio_already_set = actual == self.referral_link
+            if self._bio_already_set:
+                await self.tg_logger.log(f"📝 Реф. ссылка проставлена в описание профиля: {self.referral_link}")
+            else:
+                await self.tg_logger.log(
+                    f"📝 Описание после установки НЕ совпадает с ожидаемым: «{(actual or '')[:80]}» "
+                    f"(ждали {self.referral_link})", error="био не применилось")
+            return self._bio_already_set
         except Exception as e:
             await self.tg_logger.log("📝 Не удалось проставить реф. ссылку в описание", error=str(e))
             return False
+
+    async def _read_bio(self):
+        """Реальное описание профиля из Telegram (а не «мы же вызвали UpdateProfile»)."""
+        try:
+            from telethon.tl.functions.users import GetFullUserRequest
+            full = await self.client(GetFullUserRequest(await self.client.get_me()))
+            return (full.full_user.about or "").strip()
+        except Exception as e:
+            logger.warning(f"[{self.label}] Не удалось прочитать описание: {e}")
+            return None
 
     async def _make_bio_public(self):
         """Best-effort: пытаемся открыть видимость 'Био' всем.
