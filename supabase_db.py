@@ -316,3 +316,27 @@ class SupabaseStore:
             )
         except Exception as e:
             logger.debug("[%s] knowledge write failed: %s", self.label, e)
+
+    async def job_load(self):
+        """Расписание задач этого аккаунта (scheduler.py)."""
+        if not self.enabled or not self.session:
+            return []
+        return await self._request(
+            "GET", "/rest/v1/job_schedule",
+            params={"select": "*", "account_number": f"eq.{self._account_number()}"},
+        ) or []
+
+    async def job_save(self, job, next_run_at, last_run_at, status, message, data):
+        if not self.enabled or not self.session:
+            return
+        await self._request(
+            "POST", "/rest/v1/job_schedule",
+            params={"on_conflict": "account_number,job"},
+            payload={
+                "account_number": self._account_number(), "job": job,
+                "next_run_at": next_run_at, "last_run_at": last_run_at,
+                "last_status": status, "last_message": message,
+                "data": data or {},
+            },
+            extra_headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
+        )
