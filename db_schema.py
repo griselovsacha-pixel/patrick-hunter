@@ -71,6 +71,17 @@ TABLES = {
         ("completed_at", "timestamptz not null default now()"),
         ("stars", "numeric(12,2) not null default 0"),
     ],
+    "bot_knowledge": [
+        ("fingerprint", "text"),
+        ("kind", "text not null default 'screen'"),
+        ("title", "text"),
+        ("sample_text", "text"),
+        ("data", "jsonb not null default '{}'::jsonb"),
+        ("seen_count", "integer not null default 1"),
+        ("first_seen", "timestamptz not null default now()"),
+        ("last_seen", "timestamptz not null default now()"),
+        ("last_account", "text"),
+    ],
     "click_events": [
         ("account_id", "bigint references accounts(id) on delete cascade"),
         ("clicked_at", "timestamptz not null default now()"),
@@ -96,6 +107,8 @@ TEXT_KEY_TABLES = {"maintenance_state"}
 INDEXES = [
     "create unique index if not exists accounts_account_number_key on accounts (account_number)",
     "create unique index if not exists daily_stats_date_account_key on daily_stats (stat_date, account_id)",
+    "create unique index if not exists bot_knowledge_fp_key on bot_knowledge (fingerprint)",
+    "create index if not exists bot_knowledge_kind_seen_idx on bot_knowledge (kind, last_seen desc)",
     "create index if not exists app_logs_created_at_idx on app_logs (created_at desc)",
     "create index if not exists app_logs_level_created_idx on app_logs (level, created_at)",
     "create index if not exists balance_snapshots_acc_time_idx on balance_snapshots (account_id, captured_at desc)",
@@ -221,6 +234,39 @@ end $$
 """
 
 
+# «Обучение»: upsert записи о том, что отдал бот (см. knowledge.py).
+KNOWLEDGE_SQL = """
+create or replace function patrick_knowledge_upsert(
+    p_fingerprint text, p_kind text, p_title text, p_text text, p_data jsonb, p_account text
+) returns void
+language plpgsql
+as $$
+begin
+    insert into bot_knowledge (fingerprint, kind, title, sample_text, data, last_account)
+    values (p_fingerprint, p_kind, p_title, p_text, coalesce(p_data, '{}'::jsonb), p_account)
+    on conflict (fingerprint) do update
+       set seen_count = bot_knowledge.seen_count + 1,
+           last_seen = now(),
+           title = excluded.title,
+           sample_text = excluded.sample_text,
+           data = excluded.data,
+           last_account = excluded.last_account;
+end $$
+"""
+
+KNOWLEDGE_GRANTS_SQL = """
+do $$
+begin
+    if exists (select 1 from pg_roles where rolname = 'anon') then
+        revoke execute on function patrick_knowledge_upsert(text, text, text, text, jsonb, text)
+            from public, anon, authenticated;
+        grant execute on function patrick_knowledge_upsert(text, text, text, text, jsonb, text)
+            to service_role;
+    end if;
+end $$
+"""
+
+
 # Чтобы публичный (anon) ключ не мог дёргать RPC и портить статистику. На обычном
 # Postgres без ролей Supabase блок ничего не делает.
 RECORD_EVENT_GRANTS_SQL = """
@@ -268,6 +314,8 @@ def statements() -> list:
     out += [s.strip() for s in TRIGGER_SQL]
     out.append(RECORD_EVENT_SQL.strip())
     out.append(RECORD_EVENT_GRANTS_SQL.strip())
+    out.append(KNOWLEDGE_SQL.strip())
+    out.append(KNOWLEDGE_GRANTS_SQL.strip())
     out.append("notify pgrst, 'reload schema'")  # PostgREST сразу увидит новые колонки/функцию
     return out
 
