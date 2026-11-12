@@ -16,6 +16,7 @@
 приблизительный, «сколько раз зафиксировано»).
 """
 import asyncio
+import datetime
 import hashlib
 import logging
 import os
@@ -99,6 +100,7 @@ class Knowledge:
         self.db = db
         self.label = label
         self._pending = None  # последнее нажатие кнопки, ждём чем ответил бот
+        self._recent = {}     # id сообщения -> последняя версия (для поиска экрана-источника кнопки)
 
     # ---------- отправка ----------
     def _push(self, fp: str, kind: str, title: str, text: str, data: dict):
@@ -128,6 +130,11 @@ class Knowledge:
                 return
             kind = screen_kind(msg)
             fp = screen_fp(msg)
+            mid = getattr(msg, "id", None)
+            if mid is not None:
+                self._recent[mid] = msg
+                while len(self._recent) > 20:
+                    self._recent.pop(next(iter(self._recent)))
             data = {
                 "buttons": _buttons(msg),
                 "has_media": bool(getattr(msg, "media", None)),
@@ -141,7 +148,7 @@ class Knowledge:
     def on_click(self, btn, alert_text):
         """Вызывается из core.click_button. alert_text — всплывающее окно или None."""
         try:
-            src = getattr(btn, "message", None)
+            src = self._source_of(btn)
             sfp = screen_fp(src) if src is not None else ""
             stitle = _title(getattr(src, "text", "") or "") if src is not None else ""
             info = button_info(btn)
@@ -156,13 +163,45 @@ class Knowledge:
                 })
                 self._pending = None
             else:
-                self._pending = {"ts": time.monotonic(), "sfp": sfp, "stitle": stitle, "button": info}
+                self._pending = {"ts": time.monotonic(), "utc": datetime.datetime.now(datetime.timezone.utc), "sfp": sfp, "stitle": stitle, "button": info}
         except Exception as e:
             logger.debug("[%s] knowledge.on_click: %s", self.label, e)
+
+    def _source_of(self, btn):
+        """Экран, на котором была нажата кнопка. btn.message в Telethon не всегда
+        доступен (в первой выгрузке «экран» был пустым) — тогда ищем среди недавних
+        сообщений то, где есть кнопка с такой же подписью и data."""
+        src = getattr(btn, "message", None)
+        if src is not None and (getattr(src, "text", None) or getattr(src, "buttons", None)):
+            return src
+        want = button_info(btn)
+        for m in reversed(list(self._recent.values())):
+            for b in _buttons(m):
+                if b["text"] == want["text"] and b.get("data") == want.get("data"):
+                    return m
+        return None
+
+    def on_skipped(self, msg, btn, reason: str):
+        """Кнопка, которую обход НЕ нажимал (может тратить звёзды и т.п.) — но она есть."""
+        try:
+            sfp = screen_fp(msg)
+            info = button_info(btn)
+            tfp = _fp("transition", sfp, info["text"].lower(), "skipped")
+            self._push(tfp, "transition", f"{info['text']} → не нажимал", reason, {
+                "screen_title": _title(getattr(msg, "text", "") or ""), "screen_fp": sfp,
+                "button": info, "outcome": "skipped", "outcome_title": reason,
+            })
+        except Exception as e:
+            logger.debug("[%s] knowledge.on_skipped: %s", self.label, e)
 
     def _finish_transition(self, msg, fp, kind):
         p = self._pending
         if not p or time.monotonic() - p["ts"] > TRANSITION_WINDOW_SEC:
+            return
+        # Ответом считаем только сообщение, пришедшее/изменённое ПОСЛЕ нажатия: раньше
+        # к «Профиль» приклеивалось запоздавшее главное меню от прежнего /start.
+        eff = getattr(msg, "edit_date", None) or getattr(msg, "date", None)
+        if eff is not None and eff < p["utc"] - datetime.timedelta(seconds=1):
             return
         self._pending = None
         if fp == p["sfp"]:
