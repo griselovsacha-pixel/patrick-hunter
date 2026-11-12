@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 
 import aiohttp
 from fastapi import Header, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi import FastAPI
 
 from telethon import errors as tg_errors
@@ -567,6 +567,103 @@ async def admin_js():
             "admin.js"
         ),
         media_type="application/javascript",
+    )
+
+
+KNOWLEDGE_KINDS = ("screen", "task", "notice", "alert", "transition")
+
+
+async def _load_knowledge(kind: str | None = None, limit: int = 2000):
+    params = {
+        "select": "fingerprint,kind,title,sample_text,data,seen_count,first_seen,last_seen,last_account",
+        "order": "last_seen.desc",
+        "limit": str(max(1, min(limit, 5000))),
+    }
+    if kind in KNOWLEDGE_KINDS:
+        params["kind"] = f"eq.{kind}"
+    return await supabase_get("bot_knowledge", params)
+
+
+def _knowledge_markdown(rows: list) -> str:
+    by = {k: [] for k in KNOWLEDGE_KINDS}
+    for r in rows:
+        by.setdefault(r.get("kind") or "screen", []).append(r)
+    names = {
+        "screen": "Экраны (меню, разделы)", "task": "Задания", "notice": "Уведомления и плашки (без кнопок)",
+        "alert": "Всплывающие окна (алерты)", "transition": "Что делают кнопки (кнопка → результат)",
+    }
+    out = [
+        "# Знания о @patrickstarsrobot (авто-сбор)",
+        f"Сгенерировано: {datetime.now(ADMIN_TIMEZONE):%d.%m.%Y %H:%M}. "
+        f"Записей: {len(rows)} (" + ", ".join(f"{k}: {len(v)}" for k, v in by.items()) + ")",
+        "Числа в текстах — примеры; одинаковые по смыслу сообщения объединены в одну запись.",
+        "",
+    ]
+    for kind in KNOWLEDGE_KINDS:
+        items = by.get(kind) or []
+        if not items:
+            continue
+        out += [f"## {names[kind]}", ""]
+        for r in items:
+            d = r.get("data") or {}
+            out.append(f"### {r.get('title') or '(без заголовка)'}")
+            out.append(f"- видели: {r.get('seen_count')} раз, последний: {r.get('last_seen')}, id: `{r.get('fingerprint')}`")
+            if kind == "transition":
+                b = d.get("button") or {}
+                out.append(f"- экран: {d.get('screen_title')}")
+                out.append(f"- кнопка: «{b.get('text')}» ({b.get('type')}, data={b.get('data')})")
+                out.append(f"- результат: {d.get('outcome')} — {d.get('outcome_title')}")
+            if r.get("sample_text"):
+                out += ["```", r["sample_text"], "```"]
+            btns = d.get("buttons") or []
+            if btns:
+                out.append("- кнопки:")
+                for b in btns:
+                    extra = " ".join(x for x in (
+                        f"data={b['data']}" if b.get("data") else "",
+                        f"url={b['url']}" if b.get("url") else "") if x)
+                    out.append(f"  - «{b.get('text')}» [{b.get('type')}] {extra}".rstrip())
+            out.append("")
+    return "\n".join(out)
+
+
+@app.get("/api/admin/knowledge")
+async def admin_knowledge(
+    kind: str | None = None,
+    authorization: str | None = Header(default=None),
+):
+    check_admin_auth(authorization)
+    rows = await _load_knowledge(kind)
+    counts = {}
+    for r in rows:
+        counts[r.get("kind")] = counts.get(r.get("kind"), 0) + 1
+    return {"items": rows, "counts": counts, "total": len(rows)}
+
+
+@app.get("/api/admin/knowledge/export")
+async def admin_knowledge_export(
+    format: str = "json",
+    authorization: str | None = Header(default=None),
+):
+    check_admin_auth(authorization)
+    rows = await _load_knowledge()
+    stamp = datetime.now(ADMIN_TIMEZONE).strftime("%Y%m%d-%H%M")
+    if format == "md":
+        return Response(
+            _knowledge_markdown(rows),
+            media_type="text/markdown; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="patrick-knowledge-{stamp}.md"'},
+        )
+    payload = {
+        "bot": "@patrickstarsrobot",
+        "generated_at": datetime.now(ADMIN_TIMEZONE).isoformat(),
+        "total": len(rows),
+        "items": rows,
+    }
+    return Response(
+        json.dumps(payload, ensure_ascii=False, indent=2, default=str),
+        media_type="application/json; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="patrick-knowledge-{stamp}.json"'},
     )
 
 
