@@ -640,6 +640,31 @@ async def admin_knowledge(
     return {"items": rows, "counts": counts, "total": len(rows)}
 
 
+def _crawler_acc():
+    for acc in accounts:
+        if getattr(acc, "crawler", None):
+            return acc
+    return None
+
+
+@app.post("/api/admin/knowledge/crawl")
+async def admin_knowledge_crawl(authorization: str | None = Header(default=None)):
+    check_admin_auth(authorization)
+    acc = _crawler_acc()
+    if not acc or not acc.ready:
+        raise HTTPException(status_code=503, detail="Аккаунт ещё не запущен")
+    if not acc.crawler.request():
+        raise HTTPException(status_code=409, detail="Обход уже идёт")
+    return {"ok": True}
+
+
+@app.get("/api/admin/knowledge/crawl-status")
+async def admin_knowledge_crawl_status(authorization: str | None = Header(default=None)):
+    check_admin_auth(authorization)
+    acc = _crawler_acc()
+    return acc.crawler.status if acc else {"running": False, "progress": "аккаунт не запущен"}
+
+
 @app.get("/api/admin/knowledge/export")
 async def admin_knowledge_export(
     format: str = "json",
