@@ -330,7 +330,9 @@ class TaskRunner:
 
             btn = find_button(msg, ["задани"])
             if not btn:
-                await self.tg_logger.log("Кнопка заданий не найдена", error="нет кнопки")
+                labels = " | ".join(b.text for row in msg.buttons for b in row)[:140]
+                await self.tg_logger.log(
+                    f"Кнопка заданий не найдена\n🧾 {(msg.text or '')[:80]}\n🔘 {labels}", error="нет кнопки")
                 return random.uniform(*TASK_STUCK_RETRY_RANGE)
             since = utcnow()
             await btn.click()
