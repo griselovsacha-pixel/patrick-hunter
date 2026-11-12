@@ -25,6 +25,7 @@ from hub import Hub
 from memguard import memory_guard_cycle, rss_mb
 from supabase_db import supabase_headers
 import db_migrate
+from resources import ResourceSampler
 
 logging.basicConfig(
     level=logging.INFO,
@@ -120,6 +121,15 @@ async def lifespan(app: FastAPI):
     global _background_tasks
 
     sessions = load_account_sessions()
+
+    # Замер ресурсов: база (RSS до запуска аккаунтов) фиксируется ЗДЕСЬ
+    global sampler
+    sampler = ResourceSampler(lambda: accounts)
+    try:
+        await asyncio.wait_for(sampler.load_history(), timeout=15)
+    except Exception:
+        pass
+    _background_tasks.append(asyncio.create_task(sampler.run()))
 
     # БД: создать недостающие таблицы/колонки и строки accounts ДО старта аккаунтов.
     # Любая ошибка БД не должна мешать старту бота/HTTP.
@@ -690,6 +700,57 @@ async def admin_knowledge_export(
         media_type="application/json; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="patrick-knowledge-{stamp}.json"'},
     )
+
+
+sampler: ResourceSampler | None = None
+
+JOB_TITLES = {"tasks": "Задания", "clicker": "Клик", "daily": "Ежедневка", "crawler": "Обход бота"}
+
+
+def _acc_number(acc) -> int:
+    return int("".join(ch for ch in acc.label if ch.isdigit()) or "1")
+
+
+@app.get("/api/admin/jobs")
+async def admin_jobs(authorization: str | None = Header(default=None)):
+    check_admin_auth(authorization)
+    out = []
+    for acc in accounts:
+        sched = getattr(acc, "sched", None)
+        if not sched:
+            continue
+        snap = sched.snapshot()
+        plan = sched.get_data("clicker")
+        snap["clicker"]["plan"] = {
+            "done": plan.get("done", 0), "total": len(plan.get("times") or []), "date": plan.get("date"),
+        }
+        if not getattr(acc, "crawler", None):
+            snap.pop("crawler", None)
+        out.append({"account": _acc_number(acc), "label": acc.label, "ready": bool(acc.ready), "jobs": snap})
+    return {"accounts": out, "titles": JOB_TITLES}
+
+
+@app.post("/api/admin/run")
+async def admin_run(account: int, job: str, authorization: str | None = Header(default=None)):
+    check_admin_auth(authorization)
+    acc = next((a for a in accounts if _acc_number(a) == account), None)
+    if not acc or not getattr(acc, "sched", None):
+        raise HTTPException(status_code=404, detail="Аккаунт не найден")
+    if not acc.ready:
+        raise HTTPException(status_code=503, detail="Аккаунт ещё запускается")
+    if job not in JOB_TITLES:
+        raise HTTPException(status_code=400, detail="Неизвестная задача")
+    if not acc.sched.trigger(job):
+        raise HTTPException(status_code=409, detail="Задача уже выполняется (или для неё нет ручного запуска)")
+    return {"ok": True}
+
+
+@app.get("/api/admin/resources")
+async def admin_resources(hours: int = 24, authorization: str | None = Header(default=None)):
+    check_admin_auth(authorization)
+    if not sampler:
+        raise HTTPException(status_code=503, detail="Замер ресурсов не запущен")
+    return {"analysis": sampler.analyze(), "history": sampler.history(max(1, min(hours, 72)))}
 
 
 @app.get("/api/admin/overview")
