@@ -71,6 +71,23 @@ TABLES = {
         ("completed_at", "timestamptz not null default now()"),
         ("stars", "numeric(12,2) not null default 0"),
     ],
+    "job_schedule": [
+        ("account_number", "integer not null"),
+        ("job", "text not null"),
+        ("next_run_at", "timestamptz"),
+        ("last_run_at", "timestamptz"),
+        ("last_status", "text"),
+        ("last_message", "text"),
+        ("data", "jsonb not null default '{}'::jsonb"),
+        ("updated_at", "timestamptz not null default now()"),
+    ],
+    "resource_samples": [
+        ("ts", "timestamptz not null default now()"),
+        ("rss_mb", "numeric(8,1)"),
+        ("cpu_pct", "numeric(7,2)"),
+        ("accounts", "integer"),
+        ("tasks", "integer"),
+    ],
     "bot_knowledge": [
         ("fingerprint", "text"),
         ("kind", "text not null default 'screen'"),
@@ -107,6 +124,8 @@ TEXT_KEY_TABLES = {"maintenance_state"}
 INDEXES = [
     "create unique index if not exists accounts_account_number_key on accounts (account_number)",
     "create unique index if not exists daily_stats_date_account_key on daily_stats (stat_date, account_id)",
+    "create unique index if not exists job_schedule_acc_job_key on job_schedule (account_number, job)",
+    "create index if not exists resource_samples_ts_idx on resource_samples (ts desc)",
     "create unique index if not exists bot_knowledge_fp_key on bot_knowledge (fingerprint)",
     "create index if not exists bot_knowledge_kind_seen_idx on bot_knowledge (kind, last_seen desc)",
     "create index if not exists app_logs_created_at_idx on app_logs (created_at desc)",
