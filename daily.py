@@ -25,6 +25,8 @@ class DailyClaimer:
         self.bio_manager = bio_manager
         self.label = label
         self.db = db
+        self._wake = asyncio.Event()
+        self.sched = None  # scheduler.JobScheduler, ставится из account.py
 
     async def collect_once(self) -> int:
         """Возвращает количество секунд до следующей попытки."""
@@ -209,7 +211,29 @@ class DailyClaimer:
         await self.tg_logger.log(f"📅 Ежедневка собрана!\n📩 {resp_text[:150]}\n⏳ Следующая через {h}ч {m}м")
         return wait_sec
 
+    def request(self) -> bool:
+        """Ручной запуск из админки."""
+        self._wake.set()
+        return True
+
+    async def _sleep(self, sec: float):
+        await self.sched.set_next("daily", sec)
+        try:
+            await asyncio.wait_for(self._wake.wait(), timeout=sec)
+        except asyncio.TimeoutError:
+            pass
+        self._wake.clear()
+
     async def run_forever(self):
+        # Не стартуем сразу после рестарта: ждём по сохранённому расписанию (scheduler.py)
+        await self._sleep(await self.sched.plan_initial("daily", (120, 420)))
         while True:
-            wait_sec = await self.collect_once()
-            await asyncio.sleep(wait_sec)
+            self.sched.begin("daily")
+            wait_sec = 3600
+            try:
+                wait_sec = await self.collect_once()
+                await self.sched.end("daily", "ok", f"следующая попытка через {int(wait_sec // 60)} мин")
+            except Exception as e:
+                await self.sched.end("daily", "error", str(e)[:200])
+                raise
+            await self._sleep(wait_sec)
