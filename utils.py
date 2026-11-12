@@ -102,6 +102,23 @@ def find_button(msg, words):
     return None
 
 
+def find_button_by_data(msg, prefixes=(), exact=()):
+    """Callback-кнопка по её data (реальные значения из «Обучения»: task:ID:1,
+    skip_task:ID, tasks, main_menu…). Надёжнее подписи: тексты кнопок у бота меняются
+    («Подтвердить запуск», «Подтвердить подписку», «Я сделал(а)»)."""
+    if not msg or not msg.buttons:
+        return None
+    for row in msg.buttons:
+        for btn in row:
+            data = getattr(btn, "data", None)
+            if not data:
+                continue
+            d = bytes(data).decode("utf-8", "ignore")
+            if d in exact or any(d.startswith(p) for p in prefixes):
+                return btn
+    return None
+
+
 def solve_math(text: str):
     match = re.search(r'(\d+)\s*([\+\-\*\/])\s*(\d+)\s*=\s*\?', text)
     if match:
