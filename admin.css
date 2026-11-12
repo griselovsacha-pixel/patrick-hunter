@@ -765,3 +765,32 @@ tbody tr:hover {
         grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 }
+
+
+/* ---------- Обучение ---------- */
+.kn-toolbar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:16px 0}
+.kn-chips{display:flex;flex-wrap:wrap;gap:6px;flex:1 1 100%}
+.kn-chip{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.12);color:inherit;
+  padding:6px 12px;border-radius:999px;cursor:pointer;font:inherit;font-size:13px}
+.kn-chip.active{background:rgba(124,92,255,.25);border-color:rgba(124,92,255,.7)}
+.kn-chip b{margin-left:4px;opacity:.8}
+.kn-search{flex:1 1 220px;min-width:180px;padding:8px 12px;border-radius:10px;font:inherit;
+  background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.12);color:inherit}
+.kn-btn{padding:8px 14px;border-radius:10px;border:1px solid rgba(255,255,255,.15);cursor:pointer;
+  background:rgba(255,255,255,.06);color:inherit;font:inherit;font-size:13px}
+.kn-btn.kn-primary{background:#7c5cff;border-color:#7c5cff;color:#fff}
+.kn-status{opacity:.7;font-size:13px;padding:6px 0}
+.kn-list{display:flex;flex-direction:column;gap:8px}
+.kn-item{border:1px solid rgba(255,255,255,.1);border-radius:12px;background:rgba(255,255,255,.03);padding:10px 14px}
+.kn-item summary{display:flex;gap:10px;align-items:center;cursor:pointer;list-style:none;flex-wrap:wrap}
+.kn-title{flex:1 1 240px;font-weight:600;word-break:break-word}
+.kn-meta{opacity:.6;font-size:12px;white-space:nowrap}
+.kn-kind{font-size:11px;padding:2px 8px;border-radius:6px;background:rgba(255,255,255,.1);text-transform:uppercase}
+.kn-alert{background:rgba(255,170,0,.25)}.kn-task{background:rgba(60,200,120,.25)}
+.kn-transition{background:rgba(90,160,255,.25)}.kn-notice{background:rgba(200,100,255,.25)}
+.kn-text{white-space:pre-wrap;word-break:break-word;margin:10px 0;padding:10px;border-radius:8px;
+  background:rgba(0,0,0,.25);font-size:13px}
+.kn-flow{margin-top:10px;font-size:13px;opacity:.9}
+.kn-btns{display:flex;flex-wrap:wrap;gap:6px}
+.kn-b{font-size:12px;padding:4px 10px;border-radius:8px;border:1px solid rgba(255,255,255,.15)}
+.kn-b i{opacity:.55;margin-left:4px;font-style:normal}
