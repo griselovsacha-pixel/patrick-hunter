@@ -225,6 +225,14 @@ class PatrickAccount:
     def _register_bot_dm_handler(self):
         async def handle_bot_dm(event):
             self.knowledge.on_message(event.message)
+            # Бот сам присылает «Возможно, тебе уже доступны новые задания» / «Патрик проснулся…
+            # новые задания уже лежат под подушкой» — это сигнал запустить цикл заданий
+            # (request_run сам не чаще раза в TASK_WAKE_MIN_GAP_SEC и не во время цикла).
+            if isinstance(event, events.NewMessage.Event):
+                low = (event.message.text or "").lower()
+                if "новые задания" in low and ("доступны" in low or "под подушкой" in low):
+                    if self.tasks.request_run("бот сообщил о новых заданиях"):
+                        await self.tg_logger.log("📣 Бот сообщил о новых заданиях — запускаю цикл заданий")
             q = self.core.bot_msg_queue
             try:
                 q.put_nowait(event.message)
