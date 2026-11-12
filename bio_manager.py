@@ -38,6 +38,13 @@ class BioManager:
         снова просит» шёл бесконечно, хотя в профиле ссылки уже могло не быть)."""
         if self._bio_already_set and not force:
             return True
+        if not force:
+            # При каждом рестарте НЕ пишем в профиль вслепую (UpdateProfile + SetPrivacy
+            # на старте добавляли FloodWait): сначала читаем текущее описание.
+            current = await self._read_bio()
+            if current is not None and current == self.referral_link:
+                self._bio_already_set = True
+                return True
         try:
             await safe_call(
                 lambda: self.client(UpdateProfileRequest(about=self.referral_link)),
