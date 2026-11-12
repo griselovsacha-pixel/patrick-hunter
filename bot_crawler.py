@@ -23,7 +23,7 @@ import time
 from collections import deque
 
 from core import utcnow
-from knowledge import screen_fp
+from knowledge import screen_fp, button_info
 from utils import human_delay
 
 logger = logging.getLogger(__name__)
@@ -42,14 +42,29 @@ _SKIP_RULES = [
     (r"вывест|вывод\s*\d|подтверд|да,|✅\s*да", "подтверждение вывода/действия"),
     (r"pvp|пвп|игр|ставк|казино|кейс|nft|открыть кейс", "игры/ставки/кейсы тратят звёзды"),
     (r"проверить|проверка|пропустить|выполнил", "кнопки задания (меняют статус задания)"),
-    (r"бонус|ежедневн|забрать|получить", "забор награды (кулдауны)"),
+    (r"бонус|ежедневн|забрать|получить|промокод", "забор награды/ввод кода"),
     (r"кликер|клик|✨", "клик (кулдаун, им занимается кликер)"),
     (r"удалить|сброс|отмен|отключ", "потенциально разрушающее действие"),
 ]
 _BACK = re.compile(r"назад|вернуться|главн|в меню|^меню$|◀|⬅|🔙|🏠")
 
 
-def skip_reason(label: str):
+# Реальные callback-data бота (из «Обучения»). Навигация назад и опасные/служебные.
+_BACK_DATA = {"main_menu"}
+_SKIP_DATA_PREFIX = (
+    ("daily:", "ежедневный бонус (кулдаун)"),
+    ("clicker:", "клик (кулдаун, им занимается кликер)"),
+    ("promo:", "ввод промокода переводит бота в режим ожидания текста"),
+    ("transfer:", "перевод звёзд другу"),
+    ("captcha:", "капча"),
+    ("show_reinvite_friends", "награда за старых друзей"),
+)
+
+
+def skip_reason(label: str, data: str = ""):
+    for pref, why in _SKIP_DATA_PREFIX:
+        if (data or "").startswith(pref):
+            return why
     low = (label or "").lower()
     for rx, why in _SKIP_RULES:
         if re.search(rx, low):
@@ -170,9 +185,10 @@ class Crawler:
 
             for btn in _callback_buttons(msg):
                 label = btn.text
-                if _BACK.search(label.lower()):
+                data = button_info(btn).get("data", "")
+                if data in _BACK_DATA or _BACK.search(label.lower()):
                     continue
-                why = skip_reason(label)
+                why = skip_reason(label, data)
                 if why:
                     skipped += 1
                     self.knowledge.on_skipped(msg, btn, why)
