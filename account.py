@@ -38,6 +38,7 @@ from clicker import Clicker
 from supabase_db import SupabaseStore
 from utils import find_button
 from knowledge import Knowledge
+from crawler import Crawler
 from telethon import events
 
 logger = logging.getLogger(__name__)
@@ -90,6 +91,8 @@ class PatrickAccount:
         # «Обучение»: авто-сбор экранов/кнопок/алертов бота для админки
         self.knowledge = Knowledge(self.db, label)
         self.core.knowledge = self.knowledge
+        # Обход кнопок бота — только на первом аккаунте (второй не нужен)
+        self.crawler = Crawler(self.core, self.tg_logger, self.knowledge, label) if index == 0 else None
 
         # Кликер просит внеочередной цикл заданий, когда бот пишет «выполни задание»
         self.clicker.on_gate = self.tasks.request_run
@@ -138,6 +141,9 @@ class PatrickAccount:
             asyncio.create_task(self._supervised("stats", self._stats_cycle)),
             asyncio.create_task(self._supervised("watchdog", self._watchdog)),
         ]
+        if self.crawler:
+            self._background_tasks.append(
+                asyncio.create_task(self._supervised("crawler", self.crawler.run_forever)))
 
     async def _supervised(self, name: str, factory):
         """Фоновая задача перезапускается, если упала: раньше одно
