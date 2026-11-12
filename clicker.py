@@ -27,55 +27,113 @@ class Clicker:
         self.label = label
         self.db = db
         self.target_today = 0
+        self._manual = asyncio.Event()
+        self.sched = None  # scheduler.JobScheduler, ставится из account.py
         self.on_gate = None  # callable: просьба к TaskRunner выполнить задания (см. account.py)
 
     def _now_local(self):
         return datetime.datetime.utcnow() + datetime.timedelta(hours=TIMEZONE_OFFSET)
 
+    def request(self) -> bool:
+        """Ручной клик из админки (вне плана дня)."""
+        self._manual.set()
+        return True
+
+    def _tag(self, index, total) -> str:
+        return "ручной" if index == "ручной" else f"#{index}/{total}"
+
+    async def _wait_until(self, when_local):
+        """Спим до времени слота; ручной клик из админки выполняется по ходу ожидания."""
+        while True:
+            secs = (when_local - self._now_local()).total_seconds()
+            if secs <= 0:
+                return
+            await self.sched.set_next("clicker", secs)
+            try:
+                await asyncio.wait_for(self._manual.wait(), timeout=secs)
+            except asyncio.TimeoutError:
+                continue
+            self._manual.clear()
+            await self._manual_click()
+
+    async def _manual_click(self):
+        self.sched.begin("clicker")
+        status = "error"
+        try:
+            status = await self._click_slot("ручной", self.target_today or 0)
+        finally:
+            await self.sched.end("clicker", status, "ручной клик")
+
+    def _make_plan(self, now):
+        times_today = random.randint(CLICKER_MIN_PER_DAY, CLICKER_MAX_PER_DAY)
+        window_sec = (CLICKER_END_HOUR - CLICKER_START_HOUR) * 3600
+        part_sec = window_sec // times_today
+        day_start = now.replace(hour=CLICKER_START_HOUR, minute=0, second=0, microsecond=0)
+        midnight = day_start + datetime.timedelta(hours=CLICKER_END_HOUR - CLICKER_START_HOUR)
+        times = []
+        for i in range(times_today):
+            part_start = day_start + datetime.timedelta(seconds=i * part_sec)
+            t = part_start + datetime.timedelta(seconds=random.randint(0, int(part_sec * 0.8)) + random.randint(0, 300))
+            if t > midnight:
+                t = midnight - datetime.timedelta(seconds=random.randint(60, 600))
+            times.append(t)
+        times.sort()
+        return {"date": now.strftime("%Y-%m-%d"), "times": [t.isoformat() for t in times], "done": 0}
+
     async def run_forever(self):
+        # После рестарта план дня берём из БД и НЕ нагоняем пропущенные слоты пачкой
+        # (раньше это был залп кликов -> FloodWait). Пропущенные просто засчитываются пропущенными.
+        await self.sched.load()
+        first = True
         while True:
             try:
                 now = self._now_local()
-
                 if now.hour < CLICKER_START_HOUR:
-                    wake_at = now.replace(hour=CLICKER_START_HOUR, minute=0, second=0, microsecond=0)
-                    await asyncio.sleep((wake_at - now).total_seconds())
+                    await self._wait_until(now.replace(hour=CLICKER_START_HOUR, minute=0, second=0, microsecond=0))
                     continue
 
-                times_today = random.randint(CLICKER_MIN_PER_DAY, CLICKER_MAX_PER_DAY)
-                self.target_today = times_today
+                plan = self.sched.get_data("clicker")
+                if plan.get("date") != now.strftime("%Y-%m-%d") or not plan.get("times"):
+                    plan = self._make_plan(now)
+                    await self.sched.set_data("clicker", plan)
+                times = [datetime.datetime.fromisoformat(t) for t in plan["times"]]
+                self.target_today = len(times)
+                self.profile_stats.clicker_clicks_today = max(self.profile_stats.clicker_clicks_today, plan["done"])
 
-                window_sec = (CLICKER_END_HOUR - CLICKER_START_HOUR) * 3600
-                part_sec = window_sec // times_today
-                day_start = now.replace(hour=CLICKER_START_HOUR, minute=0, second=0, microsecond=0)
+                if first:
+                    first = False
+                    # пропущенные за простой слоты (позже 5 минут назад) — пропускаем, не догоняем
+                    idx = plan["done"]
+                    while idx < len(times) and times[idx] < now - datetime.timedelta(minutes=5):
+                        idx += 1
+                    skipped = idx - plan["done"]
+                    if skipped:
+                        await self.tg_logger.log(f"🎮 Пропущено слотов за время простоя: {skipped} (не нагоняю, чтобы не словить FloodWait)")
+                        plan["done"] = idx
+                        await self.sched.set_data("clicker", plan)
+                    # первый после рестарта слот — с разбросом и сдвигом на аккаунт, не мгновенно
+                    if plan["done"] < len(times) and times[plan["done"]] <= now:
+                        times[plan["done"]] = now + datetime.timedelta(
+                            seconds=random.uniform(240, 600) + self.sched.index * 240)
 
-                click_times = []
-                for i in range(times_today):
-                    part_start = day_start + datetime.timedelta(seconds=i * part_sec)
-                    rand_sec = random.randint(0, int(part_sec * 0.8))
-                    click_time = part_start + datetime.timedelta(seconds=rand_sec + random.randint(0, 300))
-                    midnight = day_start + datetime.timedelta(hours=16)
-                    if click_time > midnight:
-                        click_time = midnight - datetime.timedelta(seconds=random.randint(60, 600))
-                    click_times.append(click_time)
-                click_times.sort()
-
-                for i, click_time in enumerate(click_times):
-                    now = self._now_local()
-                    if click_time <= now:
-                        # Пропущенный слот (сервис перезапустился посреди дня на Render) —
-                        # нагоняем, небольшими паузами. Кулдаун между кликами у бота
-                        # ~6 минут, поэтому _click_slot сам ждёт его, а не сжигает слоты.
-                        await asyncio.sleep(random.uniform(3, 15))
-                    else:
-                        await asyncio.sleep((click_time - now).total_seconds())
-                    await self._click_slot(i + 1, times_today)
+                while plan["done"] < len(times):
+                    await self._wait_until(times[plan["done"]])
+                    self.sched.begin("clicker")
+                    status = "error"
+                    try:
+                        status = await self._click_slot(plan["done"] + 1, len(times))
+                    finally:
+                        plan["done"] += 1
+                        await self.sched.set_data("clicker", plan)
+                        await self.sched.end("clicker", status, f"клик {plan['done']}/{len(times)}")
 
                 now = self._now_local()
-                tomorrow_8 = (now + datetime.timedelta(days=1)).replace(
+                tomorrow = (now + datetime.timedelta(days=1)).replace(
                     hour=CLICKER_START_HOUR, minute=0, second=0, microsecond=0)
-                await asyncio.sleep((tomorrow_8 - now).total_seconds())
+                await self._wait_until(tomorrow)
 
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 logger.error(f"[{self.label}] Ошибка кликера: {e}")
                 await asyncio.sleep(3600)
@@ -121,7 +179,7 @@ class Clicker:
                 # _open_unlocked сам решает капчу и проходит гейт спонсоров
                 msg = await self.core._open_unlocked()
                 if not msg or not msg.buttons:
-                    await self.tg_logger.log(f"🎮 Клик #{index}/{total}: бот не ответил на /start", error="нет ответа")
+                    await self.tg_logger.log(f"🎮 Клик {self._tag(index, total)}: бот не ответил на /start", error="нет ответа")
                     return "error", 0
 
                 clicker_btn = None
@@ -136,7 +194,7 @@ class Clicker:
                 if not clicker_btn:
                     labels = " | ".join(b.text for row in msg.buttons for b in row)[:120]
                     await self.tg_logger.log(
-                        f"🎮 Клик #{index}/{total}: кнопка кликера не найдена\n🧾 {(msg.text or '')[:60]}\n🔘 {labels}",
+                        f"🎮 Клик {self._tag(index, total)}: кнопка кликера не найдена\n🧾 {(msg.text or '')[:60]}\n🔘 {labels}",
                         error="нет кнопки")
                     return "nobtn", 0
 
@@ -147,13 +205,13 @@ class Clicker:
                     kind = classify_click_alert(alert_text)
                     if kind == "cooldown":
                         wait = parse_cooldown_seconds(alert_text)
-                        await self.tg_logger.log(f"🎮 Клик #{index}/{total}: кулдаун — {alert_text}")
+                        await self.tg_logger.log(f"🎮 Клик {self._tag(index, total)}: кулдаун — {alert_text}")
                         return "cooldown", wait
                     if kind == "gate":
-                        await self.tg_logger.log(f"🎮 Клик #{index}/{total}: бот просит выполнить задания — {alert_text}")
+                        await self.tg_logger.log(f"🎮 Клик {self._tag(index, total)}: бот просит выполнить задания — {alert_text}")
                         return "gate", 0
                     if kind != "ok":
-                        await self.tg_logger.log(f"🎮 Клик #{index}/{total}: непонятный ответ бота — {alert_text}")
+                        await self.tg_logger.log(f"🎮 Клик {self._tag(index, total)}: непонятный ответ бота — {alert_text}")
                         return "unknown", 0
                     # kind == "ok" — клик засчитан, идём дальше
                 else:
@@ -165,18 +223,18 @@ class Clicker:
                     if resp and "проверка" in (resp.text or "").lower():
                         solved = await self.core.captcha.solve_if_needed(resp)
                         await self.tg_logger.log(
-                            f"🎮 Клик #{index}/{total}: капча " + ("решена" if solved else "НЕ решена")
+                            f"🎮 Клик {self._tag(index, total)}: капча " + ("решена" if solved else "НЕ решена")
                             + ", награда не подтверждена ботом — в статистику не добавляю")
                         return "unknown", 0
                     await self.tg_logger.log(
-                        f"🎮 Клик #{index}/{total}: клик не засчитан — бот показал экран «{first}» вместо награды")
+                        f"🎮 Клик {self._tag(index, total)}: клик не засчитан — бот показал экран «{first}» вместо награды")
                     return "unknown", 0
 
                 self.profile_stats.clicker_clicks_today += 1
                 if self.db:
                     await self.db.event("click", stars=0.10)
                 await self.tg_logger.log(
-                    f"🎮 Клик #{index}/{total} засчитан" + (f": {alert_text}" if alert_text else ""))
+                    f"🎮 Клик {self._tag(index, total)} засчитан" + (f": {alert_text}" if alert_text else ""))
 
                 if self.profile_stats.clicker_clicks_today % 10 == 0:
                     await self._refresh_balance()
@@ -187,7 +245,7 @@ class Clicker:
         except Exception as e:
             logger.error(f"[{self.label}] Ошибка клика #{index}: {e}")
             self.profile_stats.add_error(f"кликер#{index}: {str(e)[:40]}")
-            await self.tg_logger.log(f"🎮 Клик #{index}/{total}: исключение", error=str(e))
+            await self.tg_logger.log(f"🎮 Клик {self._tag(index, total)}: исключение", error=str(e))
             return "error", 0
 
     def _target_bot(self):
