@@ -794,3 +794,20 @@ tbody tr:hover {
 .kn-btns{display:flex;flex-wrap:wrap;gap:6px}
 .kn-b{font-size:12px;padding:4px 10px;border-radius:8px;border:1px solid rgba(255,255,255,.15)}
 .kn-b i{opacity:.55;margin-left:4px;font-style:normal}
+
+
+/* ---------- Управление / Ресурсы ---------- */
+.ctl-list{display:flex;flex-direction:column;gap:18px;margin-top:12px}
+.ctl-acc h3{margin:0 0 8px;font-size:15px}
+.ctl-jobs{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px}
+.ctl-job{border:1px solid rgba(255,255,255,.1);border-radius:12px;padding:12px;background:rgba(255,255,255,.03);
+  display:flex;flex-direction:column;gap:6px}
+.ctl-job-head{display:flex;justify-content:space-between;align-items:center;font-size:14px}
+.ctl-line{font-size:12px;opacity:.75;word-break:break-word}
+.ctl-job .kn-btn{margin-top:6px}
+.ctl-job .kn-btn:disabled{opacity:.4;cursor:not-allowed}
+.res-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;margin:14px 0}
+.res-card{border:1px solid rgba(255,255,255,.1);border-radius:12px;padding:12px;background:rgba(255,255,255,.03)}
+.res-t{font-size:12px;opacity:.65}.res-v{font-size:22px;font-weight:700;margin:4px 0}.res-s{font-size:11px;opacity:.6}
+.res-notes{font-size:13px;opacity:.85;display:flex;flex-direction:column;gap:4px;margin-bottom:14px}
+.res-chart{position:relative;height:300px}
