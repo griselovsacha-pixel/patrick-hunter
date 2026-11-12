@@ -11,7 +11,7 @@ from config import PROMO_KEYWORDS, IGNORED_WORDS, CONFIRM_WORDS, SPONSOR_GATE_HI
 from config import TASK_INTERVAL_MIN_SEC, TASK_INTERVAL_MAX_SEC
 from config import (
     TASK_MARKERS, TASK_FAIL_WORDS, TASK_OK_WORDS,
-    CLICK_OK_WORDS, CLICK_COOLDOWN_WORDS, CLICK_GATE_WORDS,
+    CLICK_OK_WORDS, CLICK_COOLDOWN_WORDS, CLICK_LIMIT_WORDS, CLICK_GATE_WORDS,
 )
 import hashlib
 from urllib.parse import parse_qsl
@@ -370,8 +370,10 @@ def classify_task_alert(text) -> str:
 
 
 def classify_click_alert(text) -> str:
-    """Всплывающее окно кликера: 'cooldown' | 'gate' | 'ok' | 'unknown'."""
+    """Всплывающее окно кликера: 'limit' | 'cooldown' | 'gate' | 'ok' | 'unknown'."""
     low = (text or "").lower()
+    if any(w in low for w in CLICK_LIMIT_WORDS):
+        return "limit"
     if any(w in low for w in CLICK_COOLDOWN_WORDS):
         return "cooldown"
     if "задани" in low and any(w in low for w in CLICK_GATE_WORDS):
