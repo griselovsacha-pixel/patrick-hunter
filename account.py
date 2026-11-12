@@ -37,6 +37,7 @@ from watcher import ChannelWatcher
 from clicker import Clicker
 from supabase_db import SupabaseStore
 from utils import find_button
+from knowledge import Knowledge
 from telethon import events
 
 logger = logging.getLogger(__name__)
@@ -85,6 +86,10 @@ class PatrickAccount:
         self.clicker = Clicker(
             self.client, self.core, self.tg_logger, self.profile_stats, label, self.db,
         )
+
+        # «Обучение»: авто-сбор экранов/кнопок/алертов бота для админки
+        self.knowledge = Knowledge(self.db, label)
+        self.core.knowledge = self.knowledge
 
         # Кликер просит внеочередной цикл заданий, когда бот пишет «выполни задание»
         self.clicker.on_gate = self.tasks.request_run
@@ -188,6 +193,7 @@ class PatrickAccount:
 
     def _register_bot_dm_handler(self):
         async def handle_bot_dm(event):
+            self.knowledge.on_message(event.message)
             q = self.core.bot_msg_queue
             try:
                 q.put_nowait(event.message)
