@@ -745,6 +745,16 @@ async def admin_run(account: int, job: str, authorization: str | None = Header(d
     return {"ok": True}
 
 
+@app.post("/api/admin/probe-withdraw")
+async def admin_probe_withdraw(account: int, authorization: str | None = Header(default=None)):
+    check_admin_auth(authorization)
+    acc = next((a for a in accounts if _acc_number(a) == account), None)
+    if not acc or not acc.ready:
+        raise HTTPException(status_code=503, detail="Аккаунт не найден или ещё запускается")
+    from withdraw_probe import probe_withdraw
+    return {"result": await probe_withdraw(acc)}
+
+
 @app.get("/api/admin/resources")
 async def admin_resources(hours: int = 24, authorization: str | None = Header(default=None)):
     check_admin_auth(authorization)
