@@ -1,193 +1,191 @@
 """
-«Обход бота» — автоматически проходит по кнопкам @patrickstarsrobot вглубь и
-собирает всё в «Обучение» (knowledge.py): экраны, тексты, кнопки, что открывает
-каждая кнопка, всплывающие алерты.
+«Обучение» — авто-сбор всего, что отдаёт @patrickstarsrobot, чтобы код можно было
+обновлять по актуальным данным, а не по догадкам.
 
-БЕЗОПАСНОСТЬ (важно, на аккаунте реальные звёзды):
-  * нажимаются только inline-кнопки с callback; ссылки (url) и мини-аппы не открываются;
-  * не нажимаются кнопки, которые могут что-то тратить/менять: суммы вывода
-    («15 ⭐»), «Подарить другу», Premium, покупки/оплата, PvP/игры, NFT-кейсы,
-    «Проверить»/«Пропустить» заданий, ежедневный бонус, клик и т.п. Они записываются
-    в «Обучение» как «не нажимал: причина» — чтобы ты видел, что там есть;
-  * бюджет: не больше CRAWL_MAX_STEPS переходов за обход и глубина CRAWL_MAX_DEPTH;
-  * лок бота берётся только на один переход (открыть → пройти путь → нажать),
-    между переходами кликер/задания/промокоды работают как обычно.
-Дополнительные стоп-слова: env CRAWL_SKIP_EXTRA="слово1,слово2".
-Обход идёт на ОДНОМ аккаунте (первом): раз в CRAWL_INTERVAL_DAYS и по кнопке в админке.
+Что собирается (всё дедуплицируется по «отпечатку», цифры в тексте нормализуются,
+поэтому «Подожди 05:50» и «Подожди 04:12» — одна запись):
+  screen      — экран бота: текст + все кнопки (подпись, тип, callback-data, ссылка)
+  task        — экран, похожий на задание (есть «новое задание»/«награда»)
+  notice      — сообщение бота без кнопок (уведомления, плашки, ответы)
+  alert       — всплывающее окно (ответ на нажатие inline-кнопки)
+  transition  — «что делает кнопка»: экран → кнопка → результат (алерт или новый экран)
+
+Пишется в таблицу bot_knowledge через RPC patrick_knowledge_upsert (см. db_schema.py).
+Сбой записи никогда не мешает работе бота. Повторные наблюдения одного и того же
+отпечатка отправляются не чаще раза в KNOWLEDGE_TOUCH_SEC (счётчик seen_count —
+приблизительный, «сколько раз зафиксировано»).
 """
 import asyncio
+import hashlib
 import logging
 import os
 import re
 import time
-from collections import deque
 
-from core import utcnow
-from knowledge import screen_fp
-from utils import human_delay
+from config import TASK_MARKERS
 
 logger = logging.getLogger(__name__)
 
-MAX_STEPS = int(os.getenv("CRAWL_MAX_STEPS", "70"))
-MAX_DEPTH = int(os.getenv("CRAWL_MAX_DEPTH", "4"))
-INTERVAL_DAYS = float(os.getenv("CRAWL_INTERVAL_DAYS", "7"))
-FIRST_DELAY_SEC = int(os.getenv("CRAWL_FIRST_DELAY_SEC", "900"))
+ENABLED = os.getenv("KNOWLEDGE_ENABLED", "1") != "0"
+TOUCH_SEC = int(os.getenv("KNOWLEDGE_TOUCH_SEC", "600"))
+TRANSITION_WINDOW_SEC = 20
 
-# (регэксп по подписи в нижнем регистре, причина)
-_SKIP_RULES = [
-    (r"\d+\s*(⭐|★|звёзд|звезд)", "сумма/подарок за звёзды — может сразу вывести"),
-    (r"подарить|подарок", "подарок за звёзды"),
-    (r"premium|премиум", "покупка Premium"),
-    (r"куп(ить|и)|оплат|пополн|депозит|donat|донат", "оплата/покупка"),
-    (r"вывест|вывод\s*\d|подтверд|да,|✅\s*да", "подтверждение вывода/действия"),
-    (r"pvp|пвп|игр|ставк|казино|кейс|nft|открыть кейс", "игры/ставки/кейсы тратят звёзды"),
-    (r"проверить|проверка|пропустить|выполнил", "кнопки задания (меняют статус задания)"),
-    (r"бонус|ежедневн|забрать|получить", "забор награды (кулдауны)"),
-    (r"кликер|клик|✨", "клик (кулдаун, им занимается кликер)"),
-    (r"удалить|сброс|отмен|отключ", "потенциально разрушающее действие"),
-]
-_BACK = re.compile(r"назад|вернуться|главн|в меню|^меню$|◀|⬅|🔙|🏠")
+# Общий для всех аккаунтов процесса: fingerprint -> monotonic последней отправки
+_seen: dict = {}
 
 
-def skip_reason(label: str):
-    low = (label or "").lower()
-    for rx, why in _SKIP_RULES:
-        if re.search(rx, low):
-            return why
-    extra = [w.strip().lower() for w in os.getenv("CRAWL_SKIP_EXTRA", "").split(",") if w.strip()]
-    for w in extra:
-        if w in low:
-            return f"стоп-слово «{w}» (CRAWL_SKIP_EXTRA)"
-    return None
+def normalize(text) -> str:
+    """Текст без изменчивых частей: числа -> #, время -> #:#, пробелы схлопнуты."""
+    t = (text or "").lower()
+    t = re.sub(r"\d+([:.,]\d+)*", "#", t)
+    t = re.sub(r"[ \t ]+", " ", t)
+    t = re.sub(r"\n\s*\n+", "\n", t)
+    return t.strip()
 
 
-def _callback_buttons(msg):
-    out = []
-    try:
-        for row in (msg.buttons or []):
-            for b in row:
-                if type(getattr(b, "button", None)).__name__ == "KeyboardButtonCallback":
-                    out.append(b)
-    except Exception:
-        pass
+def _fp(*parts) -> str:
+    return hashlib.sha1("\x1f".join(parts).encode("utf-8")).hexdigest()[:20]
+
+
+def _title(text, n=70) -> str:
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if line:
+            return line[:n]
+    return ""
+
+
+def button_info(btn) -> dict:
+    raw = getattr(btn, "button", None)
+    kind = type(raw).__name__.replace("KeyboardButton", "") or "Button"
+    data = getattr(btn, "data", None)
+    if isinstance(data, (bytes, bytearray)):
+        data = bytes(data)[:64].decode("utf-8", "replace")
+    out = {"text": (getattr(btn, "text", "") or "")[:80], "type": kind}
+    if data:
+        out["data"] = data
+    url = getattr(btn, "url", None)
+    if url:
+        out["url"] = str(url)[:300]
     return out
 
 
-class Crawler:
-    def __init__(self, core, tg_logger, knowledge, label: str):
-        self.core = core
-        self.tg_logger = tg_logger
-        self.knowledge = knowledge
+def _buttons(msg) -> list:
+    rows = []
+    try:
+        for row in (msg.buttons or []):
+            rows.extend(button_info(b) for b in row)
+    except Exception:
+        pass
+    return rows
+
+
+def screen_kind(msg) -> str:
+    low = (getattr(msg, "text", "") or "").lower()
+    if not _buttons(msg):
+        return "notice"
+    if any(m in low for m in TASK_MARKERS):
+        return "task"
+    return "screen"
+
+
+def screen_fp(msg) -> str:
+    labels = tuple(normalize(b["text"]) for b in _buttons(msg))
+    return _fp("screen", normalize(getattr(msg, "text", ""))[:300], "|".join(labels))
+
+
+class Knowledge:
+    def __init__(self, db, label: str):
+        self.db = db
         self.label = label
-        self._wake = asyncio.Event()
-        self.status = {"running": False, "last_run": None, "last_summary": None, "progress": ""}
+        self._pending = None  # последнее нажатие кнопки, ждём чем ответил бот
 
-    def request(self) -> bool:
-        if self.status["running"]:
-            return False
-        self._wake.set()
-        return True
-
-    async def run_forever(self):
+    # ---------- отправка ----------
+    def _push(self, fp: str, kind: str, title: str, text: str, data: dict):
+        if not ENABLED or not self.db:
+            return
+        now = time.monotonic()
+        last = _seen.get(fp)
+        if last is not None and now - last < TOUCH_SEC:
+            return
+        _seen[fp] = now
         try:
-            await asyncio.wait_for(self._wake.wait(), FIRST_DELAY_SEC)
-        except asyncio.TimeoutError:
+            asyncio.get_running_loop().create_task(self._send(fp, kind, title, text, data))
+        except RuntimeError:
             pass
-        while True:
-            self._wake.clear()
-            try:
-                await self.crawl()
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                logger.exception("[%s] crawler: %s", self.label, e)
-                self.status["running"] = False
-                await self.tg_logger.log("🎓 Обход бота: ошибка", error=str(e)[:200])
-            try:
-                await asyncio.wait_for(self._wake.wait(), INTERVAL_DAYS * 86400)
-            except asyncio.TimeoutError:
-                pass
 
-    async def _goto(self, path):
-        """Открыть бота, пройти по подписям кнопок path. -> (msg, alert, error)."""
-        async with self.core.bot_lock.acquire():
-            msg = await self.core._open_unlocked()
-            if not msg:
-                return None, None, "бот не ответил"
-            alert = None
-            for i, label in enumerate(path):
-                btn = next((b for b in _callback_buttons(msg) if b.text == label), None)
-                if not btn:
-                    return None, None, f"кнопка «{label}» пропала"
-                since = utcnow()
-                alert, _ = await self.core.click_button(btn)
-                if alert:
-                    # алерт не меняет экран; на промежуточном шаге путь дальше не идёт
-                    return (msg, alert, None) if i == len(path) - 1 else (None, alert, "алерт на пути")
-                nxt = await self.core.wait_fresh(since, timeout=8, fallback=False)
-                if nxt:
-                    msg = nxt
-                if i < len(path) - 1:
-                    await human_delay(1.5, 3)
-            return msg, alert, None
+    async def _send(self, fp, kind, title, text, data):
+        try:
+            await self.db.knowledge(fp, kind, title, text, data, self.label)
+        except Exception as e:
+            logger.debug("[%s] knowledge: %s", self.label, e)
 
-    async def crawl(self):
-        st = self.status
-        st.update(running=True, progress="старт")
-        t0 = time.monotonic()
-        await self.tg_logger.log("🎓 Обход бота: начинаю (только безопасные кнопки)")
-
-        seen = set()          # fp экранов, уже раскрытых
-        planned = set()       # (fp родителя, подпись) уже поставленные в очередь
-        steps = clicked = skipped = alerts = 0
-        queue = deque([([], None)])  # (путь из подписей, fp родителя)
-
-        while queue and steps < MAX_STEPS:
-            path, parent_fp = queue.popleft()
-            steps += 1
-            st["progress"] = f"шаг {steps}, очередь {len(queue)}"
-            try:
-                msg, alert, err = await self._goto(path)
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                logger.warning("[%s] crawler goto %s: %s", self.label, path, e)
-                continue
-            if path:
-                clicked += 1
-            if alert:
-                alerts += 1
-            if err or msg is None:
-                continue
-
+    # ---------- входящие сообщения бота ----------
+    def on_message(self, msg):
+        try:
+            text = getattr(msg, "text", "") or ""
+            if not text and not _buttons(msg):
+                return
+            kind = screen_kind(msg)
             fp = screen_fp(msg)
-            if fp in seen or fp == parent_fp:
-                await human_delay(2, 4)
-                continue
-            seen.add(fp)
-            if len(path) >= MAX_DEPTH:
-                continue
+            data = {
+                "buttons": _buttons(msg),
+                "has_media": bool(getattr(msg, "media", None)),
+            }
+            self._push(fp, kind, _title(text), text[:3000], data)
+            self._finish_transition(msg, fp, kind)
+        except Exception as e:
+            logger.debug("[%s] knowledge.on_message: %s", self.label, e)
 
-            for btn in _callback_buttons(msg):
-                label = btn.text
-                if _BACK.search(label.lower()):
-                    continue
-                why = skip_reason(label)
-                if why:
-                    skipped += 1
-                    self.knowledge.on_skipped(msg, btn, why)
-                    continue
-                key = (fp, label)
-                if key in planned:
-                    continue
-                planned.add(key)
-                queue.append((path + [label], fp))
-            await human_delay(3, 6)
+    # ---------- нажатия кнопок ----------
+    def on_click(self, btn, alert_text):
+        """Вызывается из core.click_button. alert_text — всплывающее окно или None."""
+        try:
+            src = getattr(btn, "message", None)
+            sfp = screen_fp(src) if src is not None else ""
+            stitle = _title(getattr(src, "text", "") or "") if src is not None else ""
+            info = button_info(btn)
+            if alert_text:
+                afp = _fp("alert", normalize(alert_text))
+                self._push(afp, "alert", _title(alert_text), alert_text[:1000],
+                           {"trigger_button": info["text"], "from_screen": stitle})
+                tfp = _fp("transition", sfp, info["text"].lower(), afp)
+                self._push(tfp, "transition", f"{info['text']} → алерт", alert_text[:1000], {
+                    "screen_title": stitle, "screen_fp": sfp, "button": info,
+                    "outcome": "alert", "outcome_title": _title(alert_text),
+                })
+                self._pending = None
+            else:
+                self._pending = {"ts": time.monotonic(), "sfp": sfp, "stitle": stitle, "button": info}
+        except Exception as e:
+            logger.debug("[%s] knowledge.on_click: %s", self.label, e)
 
-        st.update(running=False, progress="", last_run=time.strftime("%d.%m %H:%M"))
-        summary = (f"экранов {len(seen)}, переходов {steps}, нажато {clicked}, алертов {alerts}, "
-                   f"пропущено опасных кнопок {skipped}, {int(time.monotonic() - t0)} с")
-        if queue:
-            summary += f" (бюджет {MAX_STEPS} шагов исчерпан, в очереди ещё {len(queue)})"
-        st["last_summary"] = summary
-        await self.tg_logger.log(f"🎓 Обход бота завершён: {summary}")
+    def on_skipped(self, msg, btn, reason: str):
+        """Кнопка, которую обход НЕ нажимал (может тратить звёзды и т.п.) — но она есть."""
+        try:
+            sfp = screen_fp(msg)
+            info = button_info(btn)
+            tfp = _fp("transition", sfp, info["text"].lower(), "skipped")
+            self._push(tfp, "transition", f"{info['text']} → не нажимал", reason, {
+                "screen_title": _title(getattr(msg, "text", "") or ""), "screen_fp": sfp,
+                "button": info, "outcome": "skipped", "outcome_title": reason,
+            })
+        except Exception as e:
+            logger.debug("[%s] knowledge.on_skipped: %s", self.label, e)
+
+    def _finish_transition(self, msg, fp, kind):
+        p = self._pending
+        if not p or time.monotonic() - p["ts"] > TRANSITION_WINDOW_SEC:
+            return
+        self._pending = None
+        if fp == p["sfp"]:
+            outcome_title = "тот же экран (без изменений)"
+        else:
+            outcome_title = _title(getattr(msg, "text", "") or "")
+        tfp = _fp("transition", p["sfp"], p["button"]["text"].lower(), fp)
+        self._push(tfp, "transition", f"{p['button']['text']} → {outcome_title}"[:120],
+                   (getattr(msg, "text", "") or "")[:1000], {
+                       "screen_title": p["stitle"], "screen_fp": p["sfp"], "button": p["button"],
+                       "outcome": "screen", "outcome_title": outcome_title, "outcome_fp": fp,
+                       "outcome_kind": kind,
+                   })
