@@ -157,10 +157,20 @@ class Clicker:
                         return "unknown", 0
                     # kind == "ok" — клик засчитан, идём дальше
                 else:
+                    # Алерта нет: по данным «Обучения» бот в этом случае показывает либо
+                    # капчу («ПРОВЕРКА НА РОБОТА», captcha:clicker:N), либо рекламный экран
+                    # (NFT/ГДЗ) вместо клика. Раньше это считалось «клик засчитан» — ложно.
                     resp = await self.core.wait_fresh(since, timeout=6)
+                    first = ((resp.text or "").strip().splitlines() or [""])[0][:60] if resp else ""
                     if resp and "проверка" in (resp.text or "").lower():
-                        if await self.core.captcha.solve_if_needed(resp):
-                            await self.core.wait_fresh(utcnow(), timeout=6)
+                        solved = await self.core.captcha.solve_if_needed(resp)
+                        await self.tg_logger.log(
+                            f"🎮 Клик #{index}/{total}: капча " + ("решена" if solved else "НЕ решена")
+                            + ", награда не подтверждена ботом — в статистику не добавляю")
+                        return "unknown", 0
+                    await self.tg_logger.log(
+                        f"🎮 Клик #{index}/{total}: клик не засчитан — бот показал экран «{first}» вместо награды")
+                    return "unknown", 0
 
                 self.profile_stats.clicker_clicks_today += 1
                 if self.db:
