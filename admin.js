@@ -955,9 +955,12 @@ async function loadControl() {
                 </div>`;
             }).join("");
             return `<div class="ctl-acc"><h3>${escapeHtml(a.label)} ${a.ready ? "" : "<i>(запускается…)</i>"}</h3>
-                <div class="ctl-jobs">${jobs}</div></div>`;
+                <div class="ctl-jobs">${jobs}</div>
+                <button class="kn-btn" data-probe="${a.account}" ${a.ready ? "" : "disabled"}
+                    title="Нажимает минимальную сумму вывода только если бот гарантированно откажет">Проба вывода (безопасно)</button></div>`;
         }).join("");
         document.querySelectorAll("#ctl-list button[data-job]").forEach(b => b.onclick = () => runJob(b));
+        document.querySelectorAll("#ctl-list button[data-probe]").forEach(b => b.onclick = () => probeWithdraw(b));
     } catch (e) {
         $("ctl-status").textContent = "Не удалось загрузить: " + e.message;
     }
@@ -966,6 +969,20 @@ async function loadControl() {
             if (document.getElementById("section-control").classList.contains("active")) loadControl();
         }, 15000);
     }
+}
+
+async function probeWithdraw(btn) {
+    btn.disabled = true;
+    $("ctl-status").textContent = "Проба вывода идёт…";
+    try {
+        const r = await fetch(`/api/admin/probe-withdraw?account=${btn.dataset.probe}`,
+            { method: "POST", credentials: "same-origin" });
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        $("ctl-status").textContent = "Проба вывода: " + (await r.json()).result;
+    } catch (e) {
+        $("ctl-status").textContent = "Проба не удалась: " + e.message;
+    }
+    btn.disabled = false;
 }
 
 async function runJob(btn) {
