@@ -81,12 +81,28 @@ def _buttons(msg) -> list:
     return rows
 
 
+def is_ad(msg) -> bool:
+    """Рекламная вставка бота (по данным «Обучения» он иногда показывает её вместо
+    нужного экрана: «А ты знал…», NFT, ГДЗ, магазин): нет callback-кнопок, кроме
+    «в главное меню», остальные — ссылки/мини-аппы."""
+    btns = _buttons(msg)
+    if not btns:
+        return False
+    cb = [b for b in btns if b["type"] == "Callback" and b.get("data") != "main_menu"]
+    if cb:
+        return False
+    low = (getattr(msg, "text", "") or "").lower()
+    return ("а ты знал" in low or "хочешь" in low or any(b["type"] in ("Url", "WebView") for b in btns))
+
+
 def screen_kind(msg) -> str:
     low = (getattr(msg, "text", "") or "").lower()
     if not _buttons(msg):
         return "notice"
     if any(m in low for m in TASK_MARKERS):
         return "task"
+    if is_ad(msg):
+        return "ad"
     return "screen"
 
 
