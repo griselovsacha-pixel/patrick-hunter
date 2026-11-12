@@ -1,4 +1,3 @@
-
 """
 PatrickAccount — точка сборки одного Telegram-клиента.
 
@@ -8,6 +7,7 @@ Supabase. Общего состояния между аккаунтами нет
 пересылает «увидел код» соседям и ничего не блокирует).
 """
 import asyncio
+import random
 import datetime
 import logging
 
@@ -39,6 +39,7 @@ from clicker import Clicker
 from supabase_db import SupabaseStore
 from utils import find_button
 from knowledge import Knowledge
+from scheduler import JobScheduler
 from bot_crawler import Crawler
 from telethon import events
 
@@ -95,6 +96,17 @@ class PatrickAccount:
         # Обход кнопок бота — только на первом аккаунте (второй не нужен)
         self.crawler = Crawler(self.core, self.tg_logger, self.knowledge, label) if index == 0 else None
 
+        # Расписание задач в БД (переживает рестарт) + ручной запуск из админки
+        self.sched = JobScheduler(self.db, label, index)
+        for _m in (self.daily, self.tasks, self.clicker):
+            _m.sched = self.sched
+        if self.crawler:
+            self.crawler.sched = self.sched
+            self.sched.handlers["crawler"] = self.crawler.request
+        self.sched.handlers["daily"] = self.daily.request
+        self.sched.handlers["tasks"] = lambda: self.tasks.request_run("админка", force=True)
+        self.sched.handlers["clicker"] = self.clicker.request
+
         # Кликер просит внеочередной цикл заданий, когда бот пишет «выполни задание»
         self.clicker.on_gate = self.tasks.request_run
 
@@ -123,14 +135,17 @@ class PatrickAccount:
             logger.warning("[%s] catch_up: %s", self.label, e)
 
         await self.bio_manager.ensure_referral_bio()
-        await self._refresh_real_balance()
+        # Баланс на старте не читаем (лишнее открытие бота при каждом рестарте): его обновят
+        # ежедневка/задания, а здесь — один отложенный запрос с разбросом.
+        self._background_tasks_delayed = asyncio.create_task(self._delayed_balance())
 
         await self.tg_logger.log(
             "🤖 Бот запущен!\n"
             "📅 Ежедневка: по времени бота\n"
             f"📋 Задания: каждые ~{TASK_INTERVAL_MIN_SEC // 60}-{TASK_INTERVAL_MAX_SEC // 60} мин и по запросу кликера\n"
             "🔔 Промокоды и чеки: события + опрос канала каждые несколько секунд\n"
-            "🎮 Кликер: рандом раз в день, окно 8:00-00:00\n"
+            "🎮 Кликер: рандом раз в день, окно 8:00-00:00 (план дня хранится в БД)\n"
+            "🗓 После рестарта задачи идут по расписанию из БД, без залпа при старте\n"
             "💰 Баланс: читается из Профиля бота\n"
         )
         await self.db.log("INFO", "startup", "PatrickAccount started")
@@ -179,6 +194,15 @@ class PatrickAccount:
                     misses = 0
                 except Exception as e:
                     logger.warning("[%s] переподключение не удалось: %s", self.label, e)
+
+    async def _delayed_balance(self):
+        try:
+            await asyncio.sleep(random.uniform(300, 600) + self.index * 180)
+            await self._refresh_real_balance()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.debug("[%s] delayed balance: %s", self.label, e)
 
     async def _refresh_real_balance(self):
         """Открывает Профиль и сохраняет реальный баланс."""
@@ -232,6 +256,10 @@ class PatrickAccount:
 
     async def stop(self):
         self.ready = False
+        try:
+            self._background_tasks_delayed.cancel()
+        except Exception:
+            pass
         for task in self._background_tasks:
             task.cancel()
         self._background_tasks = []
