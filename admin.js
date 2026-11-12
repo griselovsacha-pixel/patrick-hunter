@@ -846,9 +846,11 @@ function renderKnowledge() {
         let flow = "";
         if (it.kind === "transition") {
             const b = d.button || {};
+            const res = d.outcome === "alert" ? "алерт"
+                      : d.outcome === "skipped" ? "не нажимал" : "экран";
             flow = `<div class="kn-flow">«${escapeHtml(d.screen_title || "")}» → <b>${escapeHtml(b.text || "")}</b> `
                  + `<i>${escapeHtml(b.type || "")}${b.data ? " · " + escapeHtml(b.data) : ""}</i> → `
-                 + `${escapeHtml(d.outcome === "alert" ? "алерт" : "экран")}: ${escapeHtml(d.outcome_title || "")}</div>`;
+                 + `${escapeHtml(res)}: ${escapeHtml(d.outcome_title || "")}</div>`;
         }
         return `<details class="kn-item">
             <summary>
@@ -894,7 +896,41 @@ async function knCopy() {
     }
 }
 
+let knPoll = null;
+
+async function knCrawlStatus() {
+    try {
+        const r = await fetch("/api/admin/knowledge/crawl-status", { credentials: "same-origin", cache: "no-store" });
+        if (!r.ok) return;
+        const s = await r.json();
+        const el = $("kn-status");
+        if (s.running) {
+            el.textContent = "Обход идёт: " + (s.progress || "…");
+        } else {
+            if (knPoll) { clearInterval(knPoll); knPoll = null; loadKnowledge(); }
+            if (s.last_summary) el.textContent = `Последний обход (${s.last_run}): ${s.last_summary}`;
+        }
+    } catch (_) {}
+}
+
+async function knCrawl() {
+    try {
+        const r = await fetch("/api/admin/knowledge/crawl", { method: "POST", credentials: "same-origin" });
+        if (!r.ok) {
+            let m = "HTTP " + r.status;
+            try { m = (await r.json()).detail || m; } catch (_) {}
+            throw new Error(m);
+        }
+        $("kn-status").textContent = "Обход запущен, он займёт несколько минут…";
+        if (knPoll) clearInterval(knPoll);
+        knPoll = setInterval(knCrawlStatus, 5000);
+    } catch (e) {
+        $("kn-status").textContent = "Не удалось запустить обход: " + e.message;
+    }
+}
+
 function setupKnowledge() {
+    $("kn-crawl").onclick = knCrawl;
     $("kn-reload").onclick = loadKnowledge;
     $("kn-json").onclick = () => knDownload("json");
     $("kn-md").onclick = () => knDownload("md");
