@@ -122,6 +122,10 @@ class Clicker:
                     status = "error"
                     try:
                         status = await self._click_slot(plan["done"] + 1, len(times))
+                        if status == "limit":
+                            # бот: «Ты слишком много кликал! Приходи завтра» — остаток слотов дня бессмыслен
+                            plan["done"] = len(times) - 1
+                            await self.tg_logger.log("🎮 Остальные клики на сегодня отменены — до завтра")
                     finally:
                         plan["done"] += 1
                         await self.sched.set_data("clicker", plan)
@@ -207,6 +211,9 @@ class Clicker:
                         wait = parse_cooldown_seconds(alert_text)
                         await self.tg_logger.log(f"🎮 Клик {self._tag(index, total)}: кулдаун — {alert_text}")
                         return "cooldown", wait
+                    if kind == "limit":
+                        await self.tg_logger.log(f"🎮 Клик {self._tag(index, total)}: дневной лимит кликов достигнут — {alert_text}")
+                        return "limit", 0
                     if kind == "gate":
                         await self.tg_logger.log(f"🎮 Клик {self._tag(index, total)}: бот просит выполнить задания — {alert_text}")
                         return "gate", 0
