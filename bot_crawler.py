@@ -31,7 +31,6 @@ logger = logging.getLogger(__name__)
 MAX_STEPS = int(os.getenv("CRAWL_MAX_STEPS", "70"))
 MAX_DEPTH = int(os.getenv("CRAWL_MAX_DEPTH", "4"))
 INTERVAL_DAYS = float(os.getenv("CRAWL_INTERVAL_DAYS", "7"))
-FIRST_DELAY_SEC = int(os.getenv("CRAWL_FIRST_DELAY_SEC", "900"))
 
 # (регэксп по подписи в нижнем регистре, причина)
 _SKIP_RULES = [
@@ -95,6 +94,7 @@ class Crawler:
         self.knowledge = knowledge
         self.label = label
         self._wake = asyncio.Event()
+        self.sched = None  # scheduler.JobScheduler, ставится из account.py
         self.status = {"running": False, "last_run": None, "last_summary": None, "progress": ""}
 
     def request(self) -> bool:
@@ -104,24 +104,29 @@ class Crawler:
         return True
 
     async def run_forever(self):
-        try:
-            await asyncio.wait_for(self._wake.wait(), FIRST_DELAY_SEC)
-        except asyncio.TimeoutError:
-            pass
+        # первый обход — по расписанию БД (или через 25-40 мин после первого запуска), не при старте
+        delay = await self.sched.plan_initial("crawler", (1500, 2400))
         while True:
+            try:
+                await asyncio.wait_for(self._wake.wait(), delay)
+            except asyncio.TimeoutError:
+                pass
             self._wake.clear()
+            self.sched.begin("crawler")
+            status, msg_ = "ok", ""
             try:
                 await self.crawl()
+                msg_ = self.status.get("last_summary") or ""
             except asyncio.CancelledError:
                 raise
             except Exception as e:
                 logger.exception("[%s] crawler: %s", self.label, e)
                 self.status["running"] = False
+                status, msg_ = "error", str(e)[:200]
                 await self.tg_logger.log("🎓 Обход бота: ошибка", error=str(e)[:200])
-            try:
-                await asyncio.wait_for(self._wake.wait(), INTERVAL_DAYS * 86400)
-            except asyncio.TimeoutError:
-                pass
+            await self.sched.end("crawler", status, msg_)
+            delay = INTERVAL_DAYS * 86400
+            await self.sched.set_next("crawler", delay)
 
     async def _goto(self, path):
         """Как _goto_once, но если бот ответил «Упс! Что-то сломалось» (троттлинг/сбой) или
