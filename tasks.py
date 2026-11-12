@@ -50,6 +50,8 @@ class TaskRunner:
         self.profile_stats = profile_stats
         self.label = label
         self.db = db
+        self.sched = None  # scheduler.JobScheduler, ставится из account.py
+        self.last_summary = ""
         self.start_offset = 0  # выставляется в account.py (индекс аккаунта * TASK_START_STAGGER_SEC)
         self._last_cycle_start = 0.0
         self._running = False
@@ -57,12 +59,13 @@ class TaskRunner:
     # ------------------------------------------------------------------
     # Пробуждение по просьбе кликера
     # ------------------------------------------------------------------
-    def request_run(self, reason: str = "") -> bool:
+    def request_run(self, reason: str = "", force: bool = False) -> bool:
         """Попросить внеочередной цикл заданий. Не чаще раза в
         TASK_WAKE_MIN_GAP_SEC и не во время идущего цикла (защита от FloodWait)."""
         if self._running:
             return True  # уже идёт — кликеру достаточно дождаться его конца
-        if self._last_cycle_start and time.monotonic() - self._last_cycle_start < TASK_WAKE_MIN_GAP_SEC:
+        if (not force and self._last_cycle_start
+                and time.monotonic() - self._last_cycle_start < TASK_WAKE_MIN_GAP_SEC):
             return False
         self.core.tasks_cycle_done.clear()  # кликер должен дождаться именно НОВОГО цикла
         self.core.tasks_wanted.set()
@@ -295,11 +298,16 @@ class TaskRunner:
     # Основной цикл
     # ------------------------------------------------------------------
     async def run_forever(self):
-        await asyncio.sleep(30 + self.start_offset)  # даём аккаунту "отлежаться"; сдвиг разводит аккаунты по времени
+        # Не стартуем сразу после рестарта: по сохранённому расписанию (scheduler.py);
+        # ручной запуск из админки (request_run force) прерывает это ожидание.
+        await self._sleep_or_wake(await self.sched.plan_initial("tasks", (300, 900)))
         while True:
             sleep_for = None
+            self.sched.begin("tasks")
+            status, msg_ = "ok", ""
             try:
                 sleep_for = await self._run_cycle()
+                msg_ = self.last_summary or ""
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -307,11 +315,15 @@ class TaskRunner:
                 self.profile_stats.add_error(f"tasks: {str(e)[:50]}")
                 await self.tg_logger.log("Ошибка цикла заданий", error=str(e))
                 sleep_for = 600
+                status, msg_ = "error", str(e)[:200]
             finally:
+                await self.sched.end("tasks", status, msg_)
                 self._running = False
                 self.core.tasks_cycle_done.set()
 
-            woke = await self._sleep_or_wake(sleep_for or random_task_interval())
+            sleep_for = sleep_for or random_task_interval()
+            await self.sched.set_next("tasks", sleep_for)
+            woke = await self._sleep_or_wake(sleep_for)
             if woke:
                 await self.tg_logger.log("⏰ Цикл заданий запущен досрочно (кликеру нужно выполнить задание)")
 
@@ -431,6 +443,8 @@ class TaskRunner:
         else:
             interval = random_task_interval()
         h, m = int(interval) // 3600, (int(interval) % 3600) // 60
+        self.last_summary = (f"{reason_end}: ✅{counters['done']} ❔{counters['unverified']} "
+                             f"❌{counters['failed']} ⏭️{counters['skip']}")
         await self.tg_logger.log(
             f"🏁 Цикл заданий завершён ({reason_end}): ✅{counters['done']} засчитано, "
             f"❔{counters['unverified']} без подтверждения, ❌{counters['failed']} не засчитано, "
