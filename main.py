@@ -570,7 +570,7 @@ async def admin_js():
     )
 
 
-KNOWLEDGE_KINDS = ("screen", "task", "notice", "alert", "transition")
+KNOWLEDGE_KINDS = ("screen", "task", "ad", "notice", "alert", "transition")
 
 
 async def _load_knowledge(kind: str | None = None, limit: int = 2000):
@@ -589,7 +589,7 @@ def _knowledge_markdown(rows: list) -> str:
     for r in rows:
         by.setdefault(r.get("kind") or "screen", []).append(r)
     names = {
-        "screen": "Экраны (меню, разделы)", "task": "Задания", "notice": "Уведомления и плашки (без кнопок)",
+        "screen": "Экраны (меню, разделы)", "task": "Задания", "ad": "Реклама бота (вставки вместо экрана)", "notice": "Уведомления и плашки (без кнопок)",
         "alert": "Всплывающие окна (алерты)", "transition": "Что делают кнопки (кнопка → результат)",
     }
     out = [
