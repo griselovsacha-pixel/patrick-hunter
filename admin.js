@@ -795,6 +795,7 @@ const KN_KINDS = {
     all: "Все",
     screen: "Экраны",
     task: "Задания",
+    ad: "Реклама",
     notice: "Плашки",
     alert: "Алерты",
     transition: "Кнопки → результат"
