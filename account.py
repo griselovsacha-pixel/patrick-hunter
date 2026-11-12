@@ -1,3 +1,4 @@
+
 """
 PatrickAccount — точка сборки одного Telegram-клиента.
 
@@ -38,7 +39,7 @@ from clicker import Clicker
 from supabase_db import SupabaseStore
 from utils import find_button
 from knowledge import Knowledge
-from crawler import Crawler
+from bot_crawler import Crawler
 from telethon import events
 
 logger = logging.getLogger(__name__)
