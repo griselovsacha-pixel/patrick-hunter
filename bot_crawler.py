@@ -23,7 +23,7 @@ import time
 from collections import deque
 
 from core import utcnow
-from knowledge import screen_fp, button_info
+from knowledge import screen_fp, button_info, is_ad
 from utils import human_delay
 
 logger = logging.getLogger(__name__)
@@ -124,6 +124,20 @@ class Crawler:
                 pass
 
     async def _goto(self, path):
+        """Как _goto_once, но если бот ответил «Упс! Что-то сломалось» (троттлинг/сбой) или
+        вместо нужного экрана показал рекламную вставку — ждём и пробуем ещё (до 2 раз)."""
+        res = (None, None, "нет попыток")
+        for attempt in range(3):
+            res = await self._goto_once(path)
+            msg, alert, err = res
+            bad = (alert and ("упс" in alert.lower() or "сломал" in alert.lower())) or \
+                  (msg is not None and path and is_ad(msg))
+            if not bad:
+                return res
+            await asyncio.sleep(25 + attempt * 20)
+        return res
+
+    async def _goto_once(self, path):
         """Открыть бота, пройти по подписям кнопок path. -> (msg, alert, error)."""
         async with self.core.bot_lock.acquire():
             msg = await self.core._open_unlocked()
@@ -143,7 +157,7 @@ class Crawler:
                 if nxt:
                     msg = nxt
                 if i < len(path) - 1:
-                    await human_delay(1.5, 3)
+                    await human_delay(4, 8)
             return msg, alert, None
 
     async def crawl(self):
@@ -198,7 +212,7 @@ class Crawler:
                     continue
                 planned.add(key)
                 queue.append((path + [label], fp))
-            await human_delay(3, 6)
+            await human_delay(8, 15)
 
         st.update(running=False, progress="", last_run=time.strftime("%d.%m %H:%M"))
         summary = (f"экранов {len(seen)}, переходов {steps}, нажато {clicked}, алертов {alerts}, "
