@@ -736,6 +736,12 @@ function setupNavigation() {
             title: "Логи",
             subtitle:
                 "Последние события приложения"
+        },
+
+        learning: {
+            title: "Обучение",
+            subtitle:
+                "Что отдаёт бот: кнопки, тексты, алерты"
         }
     };
 
@@ -767,6 +773,10 @@ function setupNavigation() {
                     target.classList.add("active");
                 }
 
+                if (section === "learning") {
+                    loadKnowledge();
+                }
+
                 if (sections[section]) {
                     $("page-title").textContent =
                         sections[section].title;
@@ -779,11 +789,125 @@ function setupNavigation() {
     });
 }
 
+// ---------------- Обучение ----------------
+
+const KN_KINDS = {
+    all: "Все",
+    screen: "Экраны",
+    task: "Задания",
+    notice: "Плашки",
+    alert: "Алерты",
+    transition: "Кнопки → результат"
+};
+let knData = { items: [], counts: {}, total: 0 };
+let knKind = "all";
+
+async function loadKnowledge() {
+    const status = $("kn-status");
+    status.textContent = "Загрузка…";
+    try {
+        const r = await fetch("/api/admin/knowledge", {
+            credentials: "same-origin", cache: "no-store"
+        });
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        knData = await r.json();
+        status.textContent = knData.total
+            ? ""
+            : "Пока пусто: записи появятся, когда бот начнёт получать сообщения от @patrickstarsrobot.";
+        renderKnowledge();
+    } catch (e) {
+        status.textContent = "Не удалось загрузить: " + e.message;
+    }
+}
+
+function renderKnowledge() {
+    const chips = $("kn-chips");
+    chips.innerHTML = Object.entries(KN_KINDS).map(([k, name]) => {
+        const n = k === "all" ? knData.total : (knData.counts[k] || 0);
+        return `<button class="kn-chip ${knKind === k ? "active" : ""}" data-k="${k}">${name} <b>${n}</b></button>`;
+    }).join("");
+    chips.querySelectorAll(".kn-chip").forEach(b => b.onclick = () => {
+        knKind = b.dataset.k;
+        renderKnowledge();
+    });
+
+    const q = ($("kn-search").value || "").toLowerCase();
+    const items = knData.items.filter(it => {
+        if (knKind !== "all" && it.kind !== knKind) return false;
+        if (!q) return true;
+        return JSON.stringify([it.title, it.sample_text, it.data]).toLowerCase().includes(q);
+    });
+
+    $("kn-list").innerHTML = items.map(it => {
+        const d = it.data || {};
+        const btns = (d.buttons || []).map(b =>
+            `<span class="kn-b" title="${escapeHtml(b.data || b.url || "")}">${escapeHtml(b.text)} <i>${escapeHtml(b.type)}</i></span>`
+        ).join("");
+        let flow = "";
+        if (it.kind === "transition") {
+            const b = d.button || {};
+            flow = `<div class="kn-flow">«${escapeHtml(d.screen_title || "")}» → <b>${escapeHtml(b.text || "")}</b> `
+                 + `<i>${escapeHtml(b.type || "")}${b.data ? " · " + escapeHtml(b.data) : ""}</i> → `
+                 + `${escapeHtml(d.outcome === "alert" ? "алерт" : "экран")}: ${escapeHtml(d.outcome_title || "")}</div>`;
+        }
+        return `<details class="kn-item">
+            <summary>
+                <span class="kn-kind kn-${it.kind}">${escapeHtml(KN_KINDS[it.kind] || it.kind)}</span>
+                <span class="kn-title">${escapeHtml(it.title || "(без заголовка)")}</span>
+                <span class="kn-meta">×${it.seen_count} · ${escapeHtml(formatDate(it.last_seen))}</span>
+            </summary>
+            ${flow}
+            ${it.sample_text ? `<pre class="kn-text">${escapeHtml(it.sample_text)}</pre>` : ""}
+            ${btns ? `<div class="kn-btns">${btns}</div>` : ""}
+        </details>`;
+    }).join("") || `<div class="kn-status">Ничего не найдено</div>`;
+}
+
+async function knFetchExport(format) {
+    const r = await fetch("/api/admin/knowledge/export?format=" + format, { credentials: "same-origin" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return r;
+}
+
+async function knDownload(format) {
+    try {
+        const r = await knFetchExport(format);
+        const blob = await r.blob();
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = `patrick-knowledge.${format === "md" ? "md" : "json"}`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+    } catch (e) {
+        $("kn-status").textContent = "Ошибка выгрузки: " + e.message;
+    }
+}
+
+async function knCopy() {
+    try {
+        const text = await (await knFetchExport("md")).text();
+        await navigator.clipboard.writeText(text);
+        $("kn-status").textContent = "Скопировано (" + text.length + " символов) — вставь в чат с Claude.";
+    } catch (e) {
+        $("kn-status").textContent = "Не удалось скопировать: " + e.message;
+    }
+}
+
+function setupKnowledge() {
+    $("kn-reload").onclick = loadKnowledge;
+    $("kn-json").onclick = () => knDownload("json");
+    $("kn-md").onclick = () => knDownload("md");
+    $("kn-copy").onclick = knCopy;
+    $("kn-search").addEventListener("input", renderKnowledge);
+}
+
 document.addEventListener(
     "DOMContentLoaded",
     () => {
 
         setupNavigation();
+        setupKnowledge();
 
         $("refresh-btn").addEventListener(
             "click",
