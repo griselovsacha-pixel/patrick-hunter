@@ -296,3 +296,23 @@ class SupabaseStore:
                 "[%s] Supabase log write failed",
                 self.label,
             )
+
+    async def knowledge(self, fingerprint, kind, title, text, data, account):
+        """«Обучение»: запись о том, что отдал бот (knowledge.py). Ошибки глотаем."""
+        if not self.enabled or not self.session:
+            return
+        try:
+            await self._request(
+                "POST",
+                "/rest/v1/rpc/patrick_knowledge_upsert",
+                payload={
+                    "p_fingerprint": fingerprint,
+                    "p_kind": kind,
+                    "p_title": (title or "")[:200],
+                    "p_text": (text or "")[:3000],
+                    "p_data": data or {},
+                    "p_account": account,
+                },
+            )
+        except Exception as e:
+            logger.debug("[%s] knowledge write failed: %s", self.label, e)
