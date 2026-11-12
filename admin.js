@@ -738,6 +738,18 @@ function setupNavigation() {
                 "Последние события приложения"
         },
 
+        control: {
+            title: "Управление",
+            subtitle:
+                "Расписание и ручной запуск задач"
+        },
+
+        resources: {
+            title: "Ресурсы",
+            subtitle:
+                "Память, CPU и сколько аккаунтов потянет сервис"
+        },
+
         learning: {
             title: "Обучение",
             subtitle:
@@ -775,6 +787,12 @@ function setupNavigation() {
 
                 if (section === "learning") {
                     loadKnowledge();
+                }
+                if (section === "control") {
+                    loadControl();
+                }
+                if (section === "resources") {
+                    loadResources();
                 }
 
                 if (sections[section]) {
@@ -897,6 +915,131 @@ async function knCopy() {
     }
 }
 
+// ---------------- Управление ----------------
+
+let ctlTimer = null;
+
+function fmtRel(iso) {
+    if (!iso) return "—";
+    const d = new Date(iso);
+    const diff = Math.round((d - Date.now()) / 1000);
+    const abs = Math.abs(diff);
+    const h = Math.floor(abs / 3600), m = Math.floor((abs % 3600) / 60);
+    const span = h ? `${h} ч ${m} мин` : `${m} мин`;
+    const at = d.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+    return diff >= 0 ? `через ${span} (${at})` : `${span} назад (${at})`;
+}
+
+async function loadControl() {
+    try {
+        const r = await fetch("/api/admin/jobs", { credentials: "same-origin", cache: "no-store" });
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        const data = await r.json();
+        $("ctl-status").textContent = data.accounts.length ? "" : "Аккаунты ещё не запущены.";
+        $("ctl-list").innerHTML = data.accounts.map(a => {
+            const jobs = Object.entries(a.jobs).map(([job, s]) => {
+                const title = (data.titles || {})[job] || job;
+                const plan = job === "clicker" && s.plan && s.plan.total
+                    ? ` · план дня ${s.plan.done}/${s.plan.total}` : "";
+                const st = s.running ? "⏳ выполняется"
+                    : (s.status === "error" ? "⚠️ ошибка" : (s.status ? "✅ ок" : "—"));
+                const btn = job === "clicker" ? "Сделать клик"
+                    : job === "tasks" ? "Сделать задания"
+                    : job === "daily" ? "Забрать ежедневку" : "Запустить обход";
+                return `<div class="ctl-job">
+                    <div class="ctl-job-head"><b>${escapeHtml(title)}</b><span>${st}</span></div>
+                    <div class="ctl-line">Следующий запуск: ${escapeHtml(fmtRel(s.next))}${plan}</div>
+                    <div class="ctl-line">Последний: ${escapeHtml(fmtRel(s.last))}${s.message ? " — " + escapeHtml(s.message) : ""}</div>
+                    <button class="kn-btn kn-primary" data-acc="${a.account}" data-job="${job}"
+                        ${(!a.ready || s.running || !s.manual) ? "disabled" : ""}>${btn}</button>
+                </div>`;
+            }).join("");
+            return `<div class="ctl-acc"><h3>${escapeHtml(a.label)} ${a.ready ? "" : "<i>(запускается…)</i>"}</h3>
+                <div class="ctl-jobs">${jobs}</div></div>`;
+        }).join("");
+        document.querySelectorAll("#ctl-list button[data-job]").forEach(b => b.onclick = () => runJob(b));
+    } catch (e) {
+        $("ctl-status").textContent = "Не удалось загрузить: " + e.message;
+    }
+    if (!ctlTimer) {
+        ctlTimer = setInterval(() => {
+            if (document.getElementById("section-control").classList.contains("active")) loadControl();
+        }, 15000);
+    }
+}
+
+async function runJob(btn) {
+    btn.disabled = true;
+    try {
+        const r = await fetch(`/api/admin/run?account=${btn.dataset.acc}&job=${btn.dataset.job}`,
+            { method: "POST", credentials: "same-origin" });
+        if (!r.ok) {
+            let m = "HTTP " + r.status;
+            try { m = (await r.json()).detail || m; } catch (_) {}
+            throw new Error(m);
+        }
+        $("ctl-status").textContent = "Запущено. Результат придёт в лог-группу Telegram.";
+        setTimeout(loadControl, 2500);
+    } catch (e) {
+        $("ctl-status").textContent = "Не удалось запустить: " + e.message;
+        btn.disabled = false;
+    }
+}
+
+// ---------------- Ресурсы ----------------
+
+let resChart = null;
+
+async function loadResources() {
+    const hours = $("res-hours").value;
+    try {
+        const r = await fetch("/api/admin/resources?hours=" + hours, { credentials: "same-origin", cache: "no-store" });
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        const d = await r.json();
+        const a = d.analysis;
+        $("res-status").textContent = "";
+        const card = (t, v, sub) => `<div class="res-card"><div class="res-t">${t}</div><div class="res-v">${v}</div><div class="res-s">${sub || ""}</div></div>`;
+        const cards = [
+            card("Память сейчас", `${a.current.rss} МБ`, `лимит ${a.limits.ram_mb} МБ · база без аккаунтов ${a.base_rss_mb} МБ`),
+            card("CPU сейчас", `${a.current.cpu}%`, `лимит ≈ ${a.limits.cpu_cores * 100}% ядра`),
+            card("Аккаунтов запущено", a.current.accounts, `asyncio-задач: ${a.current.tasks}`),
+        ];
+        if (a.recommended_total !== undefined) {
+            cards.push(
+                card("Цена аккаунта (память)", `${a.per_account_steady_mb} МБ`, `в покое · на пике ${a.per_account_peak_mb} МБ`),
+                card("Пик памяти", `${a.rss_peak_mb} МБ`, `в покое ~${a.rss_steady_mb} МБ`),
+                card("CPU средний / пик", `${a.cpu_avg_pct}% / ${a.cpu_peak_pct}%`, `на аккаунт ~${a.per_account_cpu_pct}%`),
+                card("Потянет аккаунтов", `${a.recommended_total}`, `можно добавить ещё: <b>${a.can_add}</b>`),
+                card("Разбивка лимита", `${a.max_by_memory_peak} / ${a.max_by_memory_steady} / ${a.max_by_cpu}`, "по памяти (пик) / по памяти (покой) / по CPU"),
+            );
+        }
+        $("res-cards").innerHTML = cards.join("");
+        $("res-notes").innerHTML = (a.notes || []).map(n => `<div>• ${escapeHtml(n)}</div>`).join("");
+
+        const hist = d.history || [];
+        const labels = hist.map(s => new Date(s.ts).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" }));
+        const ds = [
+            { label: "Память, МБ", data: hist.map(s => s.rss), borderColor: "#7c5cff", tension: .25, pointRadius: 0, yAxisID: "y" },
+            { label: "CPU, %", data: hist.map(s => s.cpu), borderColor: "#3cc878", tension: .25, pointRadius: 0, yAxisID: "y1" },
+            { label: "Аккаунты", data: hist.map(s => s.accounts), borderColor: "#ffaa00", stepped: true, pointRadius: 0, yAxisID: "y2" },
+        ];
+        if (resChart) resChart.destroy();
+        resChart = new Chart($("res-chart"), {
+            type: "line", data: { labels, datasets: ds },
+            options: {
+                responsive: true, maintainAspectRatio: false, interaction: { mode: "index", intersect: false },
+                scales: {
+                    y: { position: "left", title: { display: true, text: "МБ" } },
+                    y1: { position: "right", grid: { drawOnChartArea: false }, title: { display: true, text: "CPU %" } },
+                    y2: { display: false, min: 0 },
+                },
+            },
+        });
+    } catch (e) {
+        $("res-status").textContent = "Не удалось загрузить: " + e.message;
+    }
+}
+
 let knPoll = null;
 
 async function knCrawlStatus() {
@@ -931,6 +1074,7 @@ async function knCrawl() {
 }
 
 function setupKnowledge() {
+    $("res-hours").onchange = loadResources;
     $("kn-crawl").onclick = knCrawl;
     $("kn-reload").onclick = loadKnowledge;
     $("kn-json").onclick = () => knDownload("json");
