@@ -63,6 +63,7 @@ class BotCore:
 
         # Связка кликер <-> задания: кликер просит внеочередной цикл заданий
         # (tasks_wanted), а после цикла задания сообщают об этом (tasks_cycle_done).
+        self.knowledge = None  # knowledge.Knowledge — «Обучение», ставится из account.py
         self.tasks_wanted = asyncio.Event()
         self.tasks_cycle_done = asyncio.Event()
 
@@ -109,6 +110,8 @@ class BotCore:
             logger.warning(f"⚠️ [{self.label}] Ошибка клика: {e}")
             return None, None
         alert_text = getattr(answer, 'message', None) if answer is not None else None
+        if self.knowledge:
+            self.knowledge.on_click(btn, alert_text)
         return alert_text, answer
 
     async def touch_channel(self, entity):
