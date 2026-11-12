@@ -186,8 +186,10 @@ class DailyClaimer:
         ПРО ЧТО алерт, и одинаково молча ждал 24ч в обоих случаях."""
         if looks_like_bio_link_popup(alert_text):
             await self.tg_logger.log(f"📎 Бот просит ссылку в био (реальный алерт):\n{alert_text}")
-            ok = await self.bio_manager.ensure_referral_bio()
-            wait_sec = 10 * 60
+            ok = await self.bio_manager.ensure_referral_bio(force=True)
+            self._bio_retries = getattr(self, "_bio_retries", 0) + 1
+            # после нескольких неудач не долбим бота каждые 10 минут
+            wait_sec = 10 * 60 if self._bio_retries <= 3 else 60 * 60
             status = "поставил, перепроверю" if ok else "не смог поставить, попробую снова"
             await self.tg_logger.log(f"⏳ Ссылку в био {status} через {wait_sec // 60}м")
             return wait_sec
