@@ -66,6 +66,14 @@
                 <span>Логи</span>
             </button>
 
+            <button
+                class="nav-item"
+                data-section="learning"
+            >
+                🎓
+                <span>Обучение</span>
+            </button>
+
         </nav>
 
         <div class="sidebar-bottom">
@@ -762,6 +770,37 @@
 
                 </div>
 
+            </section>
+
+            <!-- ========================================= -->
+
+            <section
+                id="section-learning"
+                class="section"
+            >
+                <div class="panel">
+                    <div class="panel-header">
+                        <div>
+                            <h2>Обучение</h2>
+                            <span>
+                                Всё, что отдаёт бот: экраны, кнопки, алерты, плашки, переходы.
+                                Собирается автоматически, одинаковые сообщения объединяются.
+                            </span>
+                        </div>
+                    </div>
+
+                    <div class="kn-toolbar">
+                        <div id="kn-chips" class="kn-chips"></div>
+                        <input id="kn-search" class="kn-search" type="search"
+                               placeholder="Поиск по тексту, кнопкам, data…">
+                        <button class="kn-btn" id="kn-reload">Обновить</button>
+                        <button class="kn-btn" id="kn-json">Скачать JSON</button>
+                        <button class="kn-btn" id="kn-md">Скачать Markdown</button>
+                        <button class="kn-btn kn-primary" id="kn-copy">Скопировать для Claude</button>
+                    </div>
+                    <div id="kn-status" class="kn-status"></div>
+                    <div id="kn-list" class="kn-list"></div>
+                </div>
             </section>
 
         </div>
