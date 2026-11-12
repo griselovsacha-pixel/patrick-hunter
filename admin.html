@@ -68,6 +68,22 @@
 
             <button
                 class="nav-item"
+                data-section="control"
+            >
+                🕹
+                <span>Управление</span>
+            </button>
+
+            <button
+                class="nav-item"
+                data-section="resources"
+            >
+                📈
+                <span>Ресурсы</span>
+            </button>
+
+            <button
+                class="nav-item"
                 data-section="learning"
             >
                 🎓
@@ -773,6 +789,42 @@
             </section>
 
             <!-- ========================================= -->
+
+            <section id="section-control" class="section">
+                <div class="panel">
+                    <div class="panel-header">
+                        <div>
+                            <h2>Управление</h2>
+                            <span>
+                                Расписание задач каждого аккаунта и ручной запуск. После перезапуска сервиса
+                                задачи идут по этому расписанию (оно хранится в БД), а не все сразу.
+                            </span>
+                        </div>
+                    </div>
+                    <div id="ctl-status" class="kn-status"></div>
+                    <div id="ctl-list" class="ctl-list"></div>
+                </div>
+            </section>
+
+            <section id="section-resources" class="section">
+                <div class="panel">
+                    <div class="panel-header">
+                        <div>
+                            <h2>Ресурсы</h2>
+                            <span>Замер памяти и CPU и расчёт, сколько аккаунтов потянет сервис</span>
+                        </div>
+                        <select id="res-hours" class="kn-search" style="flex:0 0 auto;min-width:0">
+                            <option value="6">6 ч</option>
+                            <option value="24" selected>24 ч</option>
+                            <option value="72">72 ч</option>
+                        </select>
+                    </div>
+                    <div id="res-status" class="kn-status"></div>
+                    <div id="res-cards" class="res-cards"></div>
+                    <div id="res-notes" class="res-notes"></div>
+                    <div class="res-chart"><canvas id="res-chart"></canvas></div>
+                </div>
+            </section>
 
             <section
                 id="section-learning"
