@@ -98,6 +98,14 @@
                 <span>Выводы</span>
             </button>
 
+            <button
+                class="nav-item"
+                data-section="session"
+            >
+                🔑
+                <span>Сессия</span>
+            </button>
+
         </nav>
 
         <div class="sidebar-bottom">
@@ -836,6 +844,34 @@
                 </div>
             </section>
 
+            <section id="section-session" class="section">
+                <div class="panel">
+                    <div class="panel-header">
+                        <div>
+                            <h2>Генерация сессии</h2>
+                            <span>Строка сессии Telethon для нового аккаунта. Данные не сохраняются нигде.</span>
+                        </div>
+                    </div>
+                    <div class="kn-toolbar">
+                        <button class="kn-chip active" data-sgm="phone">По номеру</button>
+                        <button class="kn-chip" data-sgm="qr">По QR-коду</button>
+                    </div>
+                    <div class="sg-form">
+                        <input id="sg-api-id" class="kn-search" placeholder="api_id" autocomplete="off" inputmode="numeric">
+                        <input id="sg-api-hash" class="kn-search" placeholder="api_hash" autocomplete="off">
+                        <input id="sg-phone" class="kn-search" placeholder="Номер: +380..." autocomplete="off">
+                        <button id="sg-start" class="kn-btn kn-primary">Отправить код</button>
+                    </div>
+                    <div id="sg-step" class="sg-step"></div>
+                    <div id="sg-status" class="kn-status"></div>
+                    <div id="sg-result" class="sg-result" style="display:none">
+                        <b>Строка сессии (никому не показывай):</b>
+                        <textarea id="sg-session" class="kn-search" rows="5" readonly></textarea>
+                        <button id="sg-copy" class="kn-btn kn-primary">Скопировать</button>
+                    </div>
+                </div>
+            </section>
+
             <section id="section-resources" class="section">
                 <div class="panel">
                     <div class="panel-header">
@@ -902,6 +938,7 @@
 
 <!-- ADMIN JS -->
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <script src="/admin.js"></script>
 
 </body>
