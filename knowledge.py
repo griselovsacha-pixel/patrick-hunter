@@ -197,6 +197,17 @@ class Knowledge:
                     return m
         return None
 
+    def on_flow(self, title: str, steps: list, status: str, extra: dict = None):
+        """Сценарий целиком (например автовывод): шаги и итог. Каждый запуск — отдельная запись."""
+        try:
+            fp = _fp("flow", normalize(title), status, str(time.time()))
+            lines = [f"{s.get('t', '')} {'✓' if s.get('ok') else '✗'} {s.get('step', '')}: {s.get('detail', '')}"
+                     for s in steps]
+            self._push(fp, "flow", title[:120], "\n".join(lines)[:3000],
+                       {"status": status, "steps": steps, **(extra or {})})
+        except Exception as e:
+            logger.debug("[%s] knowledge.on_flow: %s", self.label, e)
+
     def on_skipped(self, msg, btn, reason: str):
         """Кнопка, которую обход НЕ нажимал (может тратить звёзды и т.п.) — но она есть."""
         try:
