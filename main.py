@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 import aiohttp
 from fastapi import Header, HTTPException
 from fastapi.responses import FileResponse, Response
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 
 from telethon import errors as tg_errors
 
@@ -753,6 +753,56 @@ async def admin_probe_withdraw(account: int, authorization: str | None = Header(
         raise HTTPException(status_code=503, detail="Аккаунт не найден или ещё запускается")
     from withdraw_probe import probe_withdraw
     return {"result": await probe_withdraw(acc)}
+
+
+def _sg_wrap(coro):
+    async def run():
+        try:
+            return await coro
+        except RuntimeError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    return run()
+
+
+@app.post("/api/admin/session/start")
+async def admin_session_start(request: Request, authorization: str | None = Header(default=None)):
+    check_admin_auth(authorization)
+    import session_gen as sg
+    b = await request.json()
+    if b.get("mode") == "qr":
+        return await _sg_wrap(sg.start_qr(b.get("api_id"), b.get("api_hash")))
+    return await _sg_wrap(sg.start_phone(b.get("api_id"), b.get("api_hash"), b.get("phone")))
+
+
+@app.post("/api/admin/session/code")
+async def admin_session_code(request: Request, authorization: str | None = Header(default=None)):
+    check_admin_auth(authorization)
+    import session_gen as sg
+    b = await request.json()
+    return await _sg_wrap(sg.submit_code(b.get("sid"), b.get("code")))
+
+
+@app.post("/api/admin/session/password")
+async def admin_session_password(request: Request, authorization: str | None = Header(default=None)):
+    check_admin_auth(authorization)
+    import session_gen as sg
+    b = await request.json()
+    return await _sg_wrap(sg.submit_password(b.get("sid"), b.get("password")))
+
+
+@app.get("/api/admin/session/status")
+async def admin_session_status(sid: str, authorization: str | None = Header(default=None)):
+    check_admin_auth(authorization)
+    import session_gen as sg
+    return sg.status(sid)
+
+
+@app.post("/api/admin/session/cancel")
+async def admin_session_cancel(sid: str, authorization: str | None = Header(default=None)):
+    check_admin_auth(authorization)
+    import session_gen as sg
+    await sg.cancel(sid)
+    return {"ok": True}
 
 
 @app.post("/api/admin/withdraw")
