@@ -832,3 +832,11 @@ tbody tr:hover {
 .wd-step-bad{color:var(--red)}
 .wd-run{border:1px solid rgba(77,163,255,.5);border-radius:var(--radius);padding:12px;margin:14px 0;background:rgba(77,163,255,.08)}
 .kn-flow{background:rgba(237,107,202,.25)}
+
+/* Сессия */
+.sg-form{display:flex;flex-wrap:wrap;gap:10px;margin:10px 0}
+.sg-form input{flex:1 1 200px}
+.sg-step{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:14px 0}
+.sg-qr{background:#fff;padding:10px;border-radius:12px;display:inline-block}
+.sg-result{margin-top:16px;display:flex;flex-direction:column;gap:8px}
+.sg-result textarea{width:100%;font-family:monospace;word-break:break-all}
