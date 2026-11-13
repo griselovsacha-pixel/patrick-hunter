@@ -22,8 +22,8 @@ REFERRAL_LINK = 'https://t.me/patrickstarsrobot?start=880628963'  # запасн
 # Личная реф. ссылка КАЖДОГО аккаунта (ставится в описание профиля). Можно переопределить
 # переменной окружения REFERRAL_LINK_<номер>, например REFERRAL_LINK_3.
 REFERRAL_LINKS = {
-    1: 'https://t.me/patrickstarsrobot?start=880628963',
-    2: 'https://t.me/patrickstarsrobot?start=7880707793',
+    1: 'https://t.me/patrickstarsrobot?start=7880707793',
+    2: 'https://t.me/patrickstarsrobot?start=880628963',
 }
 
 
