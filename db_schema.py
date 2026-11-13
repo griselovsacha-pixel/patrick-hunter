@@ -1,3 +1,4 @@
+
 """
 Схема БД проекта в одном месте.
 
@@ -87,6 +88,23 @@ TABLES = {
         ("cpu_pct", "numeric(7,2)"),
         ("accounts", "integer"),
         ("tasks", "integer"),
+        ("boot", "bigint"),
+    ],
+    "withdrawals": [
+        ("account_number", "integer not null"),
+        ("gift_code", "text"),
+        ("gift_emoji", "text"),
+        ("gift_name", "text"),
+        ("stars", "numeric(12,2) not null default 0"),
+        ("friend_id", "text"),
+        ("status", "text not null default 'running'"),
+        ("error", "text"),
+        ("balance_before", "numeric(12,2)"),
+        ("balance_after", "numeric(12,2)"),
+        ("steps", "jsonb not null default '[]'::jsonb"),
+        ("bot_response", "text"),
+        ("created_at", "timestamptz not null default now()"),
+        ("finished_at", "timestamptz"),
     ],
     "bot_knowledge": [
         ("fingerprint", "text"),
@@ -125,6 +143,7 @@ INDEXES = [
     "create unique index if not exists accounts_account_number_key on accounts (account_number)",
     "create unique index if not exists daily_stats_date_account_key on daily_stats (stat_date, account_id)",
     "create unique index if not exists job_schedule_acc_job_key on job_schedule (account_number, job)",
+    "create index if not exists withdrawals_created_idx on withdrawals (created_at desc)",
     "create index if not exists resource_samples_ts_idx on resource_samples (ts desc)",
     "create unique index if not exists bot_knowledge_fp_key on bot_knowledge (fingerprint)",
     "create index if not exists bot_knowledge_kind_seen_idx on bot_knowledge (kind, last_seen desc)",
