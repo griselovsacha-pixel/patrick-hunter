@@ -31,14 +31,21 @@ RAM_LIMIT_MB = float(os.getenv("RAM_LIMIT_MB", "512"))
 CPU_LIMIT_CORES = float(os.getenv("CPU_LIMIT_CORES", "0.1"))
 SAFE_RATIO = float(os.getenv("RESOURCE_SAFE_RATIO", "0.85"))
 SAMPLE_EVERY_SEC = 60
-PERSIST_EVERY = 10          # каждая 10-я точка (≈10 минут) пишется в БД
+FAST_SAMPLES = 40           # первые ~10 минут после старта меряем каждые 15 с — ловим момент подключения аккаунтов
+PERSIST_EVERY_SEC = 600     # в БД — раз в 10 минут
 KEEP_DAYS = 30
+# «Цена аккаунта» меньше шума замера (RSS гуляет на ±5–10 МБ) не измеряется — для расчёта
+# берём консервативный пол: клиент Telethon + кэш сущностей + задачи аккаунта.
+PER_ACCOUNT_FLOOR_MB = float(os.getenv("PER_ACCOUNT_FLOOR_MB", "15"))
+PER_ACCOUNT_CPU_FLOOR_PCT = float(os.getenv("PER_ACCOUNT_CPU_FLOOR_PCT", "0.3"))
 
 
 class ResourceSampler:
     def __init__(self, get_accounts):
         self.get_accounts = get_accounts
         self.base_rss = rss_mb()             # вызывать ДО запуска аккаунтов
+        self.boot = int(time.time())         # id запуска процесса: сравниваем замеры только внутри одного запуска
+        self._last_persist = 0.0
         self.ring = collections.deque(maxlen=4000)
         self._last_cpu = time.process_time()
         self._last_wall = time.monotonic()
@@ -62,17 +69,20 @@ class ResourceSampler:
             "cpu": round(cpu_pct, 2),
             "accounts": len(accounts),
             "tasks": tasks,
+            "boot": self.boot,
         }
         self.ring.append(s)
         return s
 
     async def run(self):
+        self.sample_now()   # точка «0 аккаунтов» — это и есть база для расчёта цены аккаунта
         while True:
-            await asyncio.sleep(SAMPLE_EVERY_SEC)
+            await asyncio.sleep(15 if self._n < FAST_SAMPLES else SAMPLE_EVERY_SEC)
             try:
                 s = self.sample_now()
                 self._n += 1
-                if self._n % PERSIST_EVERY == 0:
+                if time.monotonic() - self._last_persist >= PERSIST_EVERY_SEC:
+                    self._last_persist = time.monotonic()
                     await self._persist(s)
                 if time.monotonic() - self._last_cleanup > 86400:
                     self._last_cleanup = time.monotonic()
@@ -98,7 +108,7 @@ class ResourceSampler:
     async def _persist(self, s):
         await self._rest("POST", "/rest/v1/resource_samples", json={
             "ts": s["ts"], "rss_mb": s["rss"], "cpu_pct": s["cpu"],
-            "accounts": s["accounts"], "tasks": s["tasks"],
+            "accounts": s["accounts"], "tasks": s["tasks"], "boot": s["boot"],
         })
 
     async def _cleanup(self):
@@ -110,7 +120,7 @@ class ResourceSampler:
         try:
             since = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=24)).isoformat()
             body = await self._rest("GET", "/rest/v1/resource_samples", params={
-                "select": "ts,rss_mb,cpu_pct,accounts,tasks", "ts": f"gte.{since}",
+                "select": "ts,rss_mb,cpu_pct,accounts,tasks,boot", "ts": f"gte.{since}",
                 "order": "ts.asc", "limit": "2000"})
             import json
             rows = json.loads(body or "[]")
@@ -118,7 +128,8 @@ class ResourceSampler:
             logger.debug("resources.load_history: %s", e)
             return
         old = [{"ts": r["ts"], "rss": float(r["rss_mb"]), "cpu": float(r["cpu_pct"]),
-                "accounts": int(r["accounts"]), "tasks": int(r["tasks"]), "persisted": True} for r in rows]
+                "accounts": int(r["accounts"]), "tasks": int(r["tasks"]),
+                "boot": int(r.get("boot") or 0), "persisted": True} for r in rows]
         self.ring = collections.deque(old + list(self.ring), maxlen=4000)
 
     # ---------- анализ ----------
@@ -146,17 +157,33 @@ class ResourceSampler:
         cpu_avg = statistics.mean(s["cpu"] for s in settled)
         cpu_peak = max(s["cpu"] for s in samples if s["accounts"] >= 1)
 
-        per_steady = max((rss_steady - self.base_rss) / n, 1.0)
-        per_peak = max((rss_peak - self.base_rss) / n, per_steady)
+        # База = медиана RSS при 0 аккаунтов в ЭТОМ запуске процесса (если такие точки есть),
+        # иначе RSS на старте lifespan. Цена аккаунта = прирост от 0 до N аккаунтов.
+        boot_samples = [s for s in samples if s.get("boot") == self.boot]
+        zero = [s["rss"] for s in boot_samples if s["accounts"] == 0]
+        base = statistics.median(zero) if zero else self.base_rss
+        measured = (rss_steady - base) / n
+        floor = PER_ACCOUNT_FLOOR_MB
+        is_floor = measured < floor
+        per_steady = max(measured, floor)
+        per_peak = max((rss_peak - base) / n, per_steady)
         safe_mb = RAM_LIMIT_MB * SAFE_RATIO
-        max_by_steady = int((safe_mb - self.base_rss) // per_steady)
-        max_by_peak = int((safe_mb - self.base_rss) // per_peak)
+        max_by_steady = int((safe_mb - base) // per_steady)
+        max_by_peak = int((safe_mb - base) // per_peak)
 
         cpu_limit_pct = CPU_LIMIT_CORES * 100.0
-        per_cpu = max(cpu_avg / n, 0.01)
+        per_cpu = max(cpu_avg / n, PER_ACCOUNT_CPU_FLOOR_PCT)
         max_by_cpu = int((cpu_limit_pct * 0.6) // per_cpu)
 
         recommended = max(min(max_by_peak, max_by_cpu), n)
+        out["base_rss_mb"] = round(base, 1)
+        out["per_account_measured_mb"] = round(measured, 1)
+        out["per_account_is_floor"] = is_floor
+        if is_floor:
+            out["notes"].append(
+                f"Прирост памяти от аккаунтов ({measured:.1f} МБ на штуку) меньше шума замера, поэтому в расчёте "
+                f"заложено {floor:.0f} МБ на аккаунт (PER_ACCOUNT_FLOOR_MB). Реальная цена, скорее всего, меньше — "
+                f"память не узкое место.")
         out.update({
             "accounts": n,
             "rss_steady_mb": round(rss_steady, 1),
@@ -177,8 +204,7 @@ class ResourceSampler:
             out["notes"].append("Мало данных после старта (меньше ~15 минут) — оценка грубая, подожди час-два.")
         if n < 3:
             out["notes"].append(
-                "Аккаунтов мало: «цена аккаунта» считается как (RSS − база)/N, и ошибка базы заметна. "
-                "После подключения 3–4 аккаунтов оценка станет точнее.")
+                "Аккаунтов мало, замер грубый. После подключения 3–4 аккаунтов оценка станет точнее.")
         if cpu_peak > cpu_limit_pct * 3:
             out["notes"].append(
                 "Пики CPU сильно выше лимита (0.1 ядра): при старте/обходе сервис может тормозить. "
