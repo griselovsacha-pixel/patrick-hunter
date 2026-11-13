@@ -750,6 +750,11 @@ function setupNavigation() {
                 "Память, CPU и сколько аккаунтов потянет сервис"
         },
 
+        withdraw: {
+            title: "Выводы",
+            subtitle: "Автовывод звёзд подарком другу"
+        },
+
         learning: {
             title: "Обучение",
             subtitle:
@@ -794,6 +799,9 @@ function setupNavigation() {
                 if (section === "resources") {
                     loadResources();
                 }
+                if (section === "withdraw") {
+                    loadWithdraw();
+                }
 
                 if (sections[section]) {
                     $("page-title").textContent =
@@ -816,6 +824,7 @@ const KN_KINDS = {
     ad: "Реклама",
     notice: "Плашки",
     alert: "Алерты",
+    flow: "Сценарии",
     transition: "Кнопки → результат"
 };
 let knData = { items: [], counts: {}, total: 0 };
@@ -1023,7 +1032,10 @@ async function loadResources() {
         ];
         if (a.recommended_total !== undefined) {
             cards.push(
-                card("Цена аккаунта (память)", `${a.per_account_steady_mb} МБ`, `в покое · на пике ${a.per_account_peak_mb} МБ`),
+                card("Цена аккаунта (память)", `${a.per_account_steady_mb} МБ${a.per_account_is_floor ? " *" : ""}`,
+                    a.per_account_is_floor
+                        ? `* заложено с запасом; замер ${a.per_account_measured_mb} МБ — ниже шума`
+                        : `в покое · на пике ${a.per_account_peak_mb} МБ`),
                 card("Пик памяти", `${a.rss_peak_mb} МБ`, `в покое ~${a.rss_steady_mb} МБ`),
                 card("CPU средний / пик", `${a.cpu_avg_pct}% / ${a.cpu_peak_pct}%`, `на аккаунт ~${a.per_account_cpu_pct}%`),
                 card("Потянет аккаунтов", `${a.recommended_total}`, `можно добавить ещё: <b>${a.can_add}</b>`),
@@ -1120,3 +1132,119 @@ document.addEventListener(
         );
     }
 );
+
+
+// ---------------- Выводы ----------------
+let wdData = null, wdFilter = "all", wdTimer = null, wdSel = {};
+
+const WD_STATUS = {
+    running: ["⏳ идёт", "wd-b-run"], success: ["✅ успешно", "wd-b-ok"],
+    unverified: ["❔ не подтверждено", "wd-b-warn"], failed: ["❌ ошибка", "wd-b-bad"]
+};
+
+function wdBadge(st) {
+    const [t, c] = WD_STATUS[st] || [st, ""];
+    return `<span class="wd-badge ${c}">${t}</span>`;
+}
+
+function wdSteps(steps) {
+    return (steps || []).map(s =>
+        `<div class="wd-step ${s.ok ? "" : "wd-step-bad"}"><span>${escapeHtml(s.t)}</span>
+         ${s.ok ? "✓" : "✗"} <b>${escapeHtml(s.step)}</b> ${escapeHtml(s.detail || "")}</div>`).join("");
+}
+
+async function loadWithdraw() {
+    try {
+        const r = await fetch("/api/admin/withdrawals", { credentials: "same-origin", cache: "no-store" });
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        wdData = await r.json();
+        $("wd-status").textContent = "";
+        renderWithdraw();
+    } catch (e) {
+        $("wd-status").textContent = "Не удалось загрузить: " + e.message;
+    }
+    if (!wdTimer) {
+        wdTimer = setInterval(() => {
+            const open = document.getElementById("section-withdraw").classList.contains("active");
+            if (open && (wdData && wdData.running)) loadWithdraw();
+        }, 3000);
+    }
+}
+
+function renderWithdraw() {
+    const d = wdData, sm = d.summary;
+    $("wd-sub").textContent = `Подарок другу ${d.friend_id}: Вывод звезд → Подарить другу → ID → Подтвердить`;
+    $("wd-stats").innerHTML = [
+        ["Успешных", sm.success], ["Выведено ⭐", formatStars(sm.stars_out)],
+        ["Не подтверждено", sm.unverified], ["Ошибок", sm.failed]
+    ].map(([k, v]) => `<div class="res-card"><div class="res-k">${k}</div><div class="res-v">${v}</div></div>`).join("");
+
+    const run = d.running;
+    $("wd-running").innerHTML = run ? `<div class="wd-run"><b>⏳ ${escapeHtml(run.label)}: ${run.gift_emoji}
+        ${escapeHtml(run.gift_name)} ${run.stars}⭐ → ${escapeHtml(run.friend_id)}</b>${wdSteps(run.steps)}</div>` : "";
+
+    $("wd-accs").innerHTML = d.accounts.map(a => {
+        const sel = wdSel[a.account];
+        const gifts = d.gifts.map(g => {
+            const why = !d.enabled ? "автовывод выключен" : !a.ready ? "аккаунт запускается"
+                : run ? "идёт другой вывод" : a.balance < g.stars ? `не хватает ${(g.stars - a.balance).toFixed(2)}⭐` : "";
+            const can = !why;
+            return `<div class="wd-gift ${can ? "can" : "cant"} ${sel === g.code ? "sel" : ""}" data-acc="${a.account}"
+                data-code="${g.code}" data-can="${can ? 1 : 0}">
+                <div class="wd-emoji">${g.emoji}</div><div class="wd-gname">${escapeHtml(g.name)}</div>
+                <div class="wd-price">${g.stars}⭐</div><div class="wd-why">${can ? "можно вывести" : escapeHtml(why)}</div></div>`;
+        }).join("");
+        const g = d.gifts.find(x => x.code === sel);
+        return `<div class="ctl-acc"><h3>${escapeHtml(a.label)}</h3>
+            <div class="ctl-line">Баланс: <b>${a.balance}⭐</b> · друзей: ${a.friends} · активировали: ${a.activated}
+            <span style="opacity:.6">(данные последнего обновления профиля)</span></div>
+            <div class="wd-grid">${gifts}</div>
+            <button class="kn-btn kn-primary" data-go="${a.account}" ${(g && !run) ? "" : "disabled"}>
+                ${g ? `Вывести ${g.emoji} ${g.stars}⭐ другу ${escapeHtml(d.friend_id)}` : "Выбери подарок"}</button></div>`;
+    }).join("");
+    document.querySelectorAll(".wd-gift[data-can='1']").forEach(el => el.onclick = () => {
+        wdSel[el.dataset.acc] = el.dataset.code; renderWithdraw();
+    });
+    document.querySelectorAll("button[data-go]").forEach(b => b.onclick = () => startWithdraw(b.dataset.go));
+
+    let rows = d.history;
+    if (wdFilter === "success") rows = rows.filter(h => h.status === "success");
+    if (wdFilter === "problems") rows = rows.filter(h => h.status === "failed" || h.status === "unverified");
+    $("wd-history").innerHTML = rows.length ? `<table class="wd-table"><thead><tr><th>Когда</th><th>Акк.</th>
+        <th>Подарок</th><th>Баланс</th><th>Статус</th></tr></thead><tbody>` + rows.map(h => `<tr>
+        <td>${formatDate(h.created_at)}</td><td>#${h.account_number ?? ""}</td>
+        <td>${escapeHtml(h.gift_emoji || "")} ${escapeHtml(h.gift_name || "")} ${h.stars}⭐ → ${escapeHtml(h.friend_id || "")}</td>
+        <td>${h.balance_before ?? "?"} → ${h.balance_after ?? "?"}</td>
+        <td>${wdBadge(h.status)}${h.error ? `<div class="wd-err">${escapeHtml(h.error)}</div>` : ""}
+        <details><summary>шаги</summary>${wdSteps(h.steps)}${h.bot_response ? `<div class="wd-step">Ответ бота: ${escapeHtml(h.bot_response)}</div>` : ""}</details></td></tr>`).join("")
+        + "</tbody></table>" : `<div class="kn-status">Выводов пока нет</div>`;
+}
+
+document.addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-wf]");
+    if (!b) return;
+    wdFilter = b.dataset.wf;
+    document.querySelectorAll("button[data-wf]").forEach(x => x.classList.toggle("active", x === b));
+    if (wdData) renderWithdraw();
+});
+
+async function startWithdraw(acc) {
+    const code = wdSel[acc];
+    const g = wdData.gifts.find(x => x.code === code);
+    if (!g) return;
+    if (!confirm(`Вывести ${g.emoji} ${g.name} за ${g.stars}⭐ другу ${wdData.friend_id}?\nЗвёзды будут списаны по-настоящему.`)) return;
+    try {
+        const r = await fetch(`/api/admin/withdraw?account=${acc}&gift=${encodeURIComponent(code)}`,
+            { method: "POST", credentials: "same-origin" });
+        if (!r.ok) {
+            let m = "HTTP " + r.status;
+            try { m = (await r.json()).detail || m; } catch (_) {}
+            throw new Error(m);
+        }
+        wdSel[acc] = null;
+        $("wd-status").textContent = "Вывод запущен";
+    } catch (e) {
+        $("wd-status").textContent = "Не удалось запустить: " + e.message;
+    }
+    loadWithdraw();
+}
