@@ -580,7 +580,7 @@ async def admin_js():
     )
 
 
-KNOWLEDGE_KINDS = ("screen", "task", "ad", "notice", "alert", "transition")
+KNOWLEDGE_KINDS = ("screen", "task", "ad", "notice", "alert", "transition", "flow")
 
 
 async def _load_knowledge(kind: str | None = None, limit: int = 2000):
@@ -600,7 +600,7 @@ def _knowledge_markdown(rows: list) -> str:
         by.setdefault(r.get("kind") or "screen", []).append(r)
     names = {
         "screen": "Экраны (меню, разделы)", "task": "Задания", "ad": "Реклама бота (вставки вместо экрана)", "notice": "Уведомления и плашки (без кнопок)",
-        "alert": "Всплывающие окна (алерты)", "transition": "Что делают кнопки (кнопка → результат)",
+        "flow": "Сценарии (автовывод и т.п.)", "alert": "Всплывающие окна (алерты)", "transition": "Что делают кнопки (кнопка → результат)",
     }
     out = [
         "# Знания о @patrickstarsrobot (авто-сбор)",
@@ -753,6 +753,52 @@ async def admin_probe_withdraw(account: int, authorization: str | None = Header(
         raise HTTPException(status_code=503, detail="Аккаунт не найден или ещё запускается")
     from withdraw_probe import probe_withdraw
     return {"result": await probe_withdraw(acc)}
+
+
+@app.post("/api/admin/withdraw")
+async def admin_withdraw(account: int, gift: str, authorization: str | None = Header(default=None)):
+    check_admin_auth(authorization)
+    import withdraw as wd
+    acc = next((a for a in accounts if _acc_number(a) == account), None)
+    if not acc or not acc.ready:
+        raise HTTPException(status_code=503, detail="Аккаунт не найден или ещё запускается")
+    try:
+        job = await wd.manager.start(acc, gift)
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"ok": True, "job": job}
+
+
+@app.get("/api/admin/withdrawals")
+async def admin_withdrawals(limit: int = 200, authorization: str | None = Header(default=None)):
+    check_admin_auth(authorization)
+    import withdraw as wd
+    try:
+        history = await supabase_get("withdrawals", {
+            "select": "*", "order": "created_at.desc", "limit": str(max(1, min(limit, 500)))})
+    except Exception:
+        history = wd.manager.recent
+    running = wd.manager.current
+    if running:
+        history = [h for h in history if h.get("id") != running.get("id")]
+    accs = []
+    for a in accounts:
+        ps = a.profile_stats
+        accs.append({
+            "account": _acc_number(a), "label": a.label, "ready": bool(a.ready),
+            "balance": round(float(ps.balance or 0), 2), "friends": ps.friends, "activated": ps.activated,
+        })
+    done = [h for h in history if h.get("status") == "success"]
+    return {
+        "enabled": wd.ENABLED, "friend_id": wd.FRIEND_ID, "gifts": wd.GIFTS,
+        "running": running, "history": history, "accounts": accs,
+        "summary": {
+            "total": len(history), "success": len(done),
+            "unverified": sum(1 for h in history if h.get("status") == "unverified"),
+            "failed": sum(1 for h in history if h.get("status") == "failed"),
+            "stars_out": round(sum(float(h.get("stars") or 0) for h in done), 2),
+        },
+    }
 
 
 @app.get("/api/admin/resources")
