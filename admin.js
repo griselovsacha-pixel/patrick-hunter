@@ -750,6 +750,11 @@ function setupNavigation() {
                 "Память, CPU и сколько аккаунтов потянет сервис"
         },
 
+        session: {
+            title: "Сессия",
+            subtitle: "Генерация строки сессии Telethon"
+        },
+
         withdraw: {
             title: "Выводы",
             subtitle: "Автовывод звёзд подарком другу"
@@ -1248,3 +1253,103 @@ async function startWithdraw(acc) {
     }
     loadWithdraw();
 }
+
+
+// ---------------- Генерация сессии ----------------
+let sgMode = "phone", sgSid = null, sgTimer = null;
+
+function sgReset() {
+    clearInterval(sgTimer); sgTimer = null; sgSid = null;
+    $("sg-step").innerHTML = ""; $("sg-result").style.display = "none"; $("sg-session").value = "";
+    $("sg-start").disabled = false;
+}
+
+async function sgApi(path, body, method = "POST") {
+    const r = await fetch("/api/admin/session/" + path, {
+        method, credentials: "same-origin", cache: "no-store",
+        headers: { "Content-Type": "application/json" },
+        body: method === "POST" && body ? JSON.stringify(body) : undefined
+    });
+    let j = {}; try { j = await r.json(); } catch (_) {}
+    if (!r.ok) throw new Error(j.detail || ("HTTP " + r.status));
+    return j;
+}
+
+function sgRender(st) {
+    const step = $("sg-step");
+    if (st.state === "need_code") {
+        step.innerHTML = `<div>Код отправлен в Telegram (или SMS). Введи его:</div>
+            <input id="sg-in" class="kn-search" placeholder="Код" autocomplete="off" inputmode="numeric">
+            <button id="sg-ok" class="kn-btn kn-primary">Подтвердить</button>`;
+        $("sg-ok").onclick = () => sgSubmit("code", { code: $("sg-in").value });
+    } else if (st.state === "need_password") {
+        step.innerHTML = `<div>На аккаунте включён облачный пароль (2FA):</div>
+            <input id="sg-in" type="password" class="kn-search" placeholder="Пароль" autocomplete="off">
+            <button id="sg-ok" class="kn-btn kn-primary">Войти</button>`;
+        $("sg-ok").onclick = () => sgSubmit("password", { password: $("sg-in").value });
+    } else if (st.state === "qr_wait") {
+        if (!$("sg-qr")) {
+            step.innerHTML = `<div>Telegram → Настройки → Устройства → Подключить устройство → наведи на код.<br>
+                Код обновляется сам каждые ~25 секунд.</div><div id="sg-qr" class="sg-qr"></div>`;
+        }
+        if ($("sg-qr").dataset.url !== st.qr_url) {
+            $("sg-qr").dataset.url = st.qr_url; $("sg-qr").innerHTML = "";
+            if (window.QRCode) new QRCode($("sg-qr"), { text: st.qr_url, width: 220, height: 220 });
+            else $("sg-qr").textContent = st.qr_url;
+        }
+    } else if (st.state === "done") {
+        clearInterval(sgTimer); sgTimer = null; step.innerHTML = "";
+        $("sg-session").value = st.session; $("sg-result").style.display = "block";
+        $("sg-status").textContent = "Готово. Скопируй строку — на сервере она уже не хранится после закрытия вкладки/отмены.";
+        $("sg-api-hash").value = "";
+        fetch("/api/admin/session/cancel?sid=" + encodeURIComponent(sgSid), { method: "POST", credentials: "same-origin" });
+    } else if (st.state === "error" || st.state === "gone") {
+        clearInterval(sgTimer); sgTimer = null; step.innerHTML = "";
+        $("sg-status").textContent = "Ошибка: " + (st.error || "попытка истекла"); $("sg-start").disabled = false;
+    }
+}
+
+async function sgSubmit(path, body) {
+    $("sg-status").textContent = "…";
+    try {
+        const st = await sgApi(path, { sid: sgSid, ...body });
+        $("sg-status").textContent = "";
+        sgRender(st);
+    } catch (e) { $("sg-status").textContent = "Ошибка: " + e.message; }
+}
+
+async function sgStart() {
+    sgReset();
+    $("sg-status").textContent = "Запрашиваю у Telegram…";
+    $("sg-start").disabled = true;
+    try {
+        const st = await sgApi("start", {
+            mode: sgMode, api_id: $("sg-api-id").value, api_hash: $("sg-api-hash").value, phone: $("sg-phone").value
+        });
+        sgSid = st.sid; $("sg-status").textContent = "";
+        sgRender(st);
+        if (sgMode === "qr") {
+            sgTimer = setInterval(async () => {
+                try { sgRender(await sgApi("status?sid=" + encodeURIComponent(sgSid), null, "GET")); } catch (_) {}
+            }, 2000);
+        }
+    } catch (e) {
+        $("sg-status").textContent = "Ошибка: " + e.message; $("sg-start").disabled = false;
+    }
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+    $("sg-start").onclick = sgStart;
+    $("sg-copy").onclick = async () => {
+        try { await navigator.clipboard.writeText($("sg-session").value); $("sg-status").textContent = "Скопировано"; }
+        catch (_) { $("sg-session").select(); }
+    };
+    document.querySelectorAll("button[data-sgm]").forEach(b => b.onclick = () => {
+        sgMode = b.dataset.sgm;
+        document.querySelectorAll("button[data-sgm]").forEach(x => x.classList.toggle("active", x === b));
+        $("sg-phone").style.display = sgMode === "phone" ? "" : "none";
+        $("sg-start").textContent = sgMode === "phone" ? "Отправить код" : "Показать QR";
+        if (sgSid) fetch("/api/admin/session/cancel?sid=" + encodeURIComponent(sgSid), { method: "POST", credentials: "same-origin" });
+        sgReset(); $("sg-status").textContent = "";
+    });
+});
