@@ -53,10 +53,13 @@ class PatrickAccount:
         self.ready = False  # True, когда клиент поднят и ловля промо/чеков запущена
         self.db = SupabaseStore(label)
 
+        from proxy_conf import proxy_for
+        digits = "".join(ch for ch in label if ch.isdigit())
         self.client = TelegramClient(
             StringSession(session_string),
             API_ID,
             API_HASH,
+            proxy=proxy_for(int(digits or "1")),
         )
 
         self.bot_lock = PriorityLock()
