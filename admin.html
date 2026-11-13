@@ -90,6 +90,14 @@
                 <span>Обучение</span>
             </button>
 
+            <button
+                class="nav-item"
+                data-section="withdraw"
+            >
+                💸
+                <span>Выводы</span>
+            </button>
+
         </nav>
 
         <div class="sidebar-bottom">
@@ -803,6 +811,28 @@
                     </div>
                     <div id="ctl-status" class="kn-status"></div>
                     <div id="ctl-list" class="ctl-list"></div>
+                </div>
+            </section>
+
+            <section id="section-withdraw" class="section">
+                <div class="panel">
+                    <div class="panel-header">
+                        <div>
+                            <h2>Выводы</h2>
+                            <span id="wd-sub">Подарок другу: Вывод звезд → Подарить другу → ID → Подтвердить</span>
+                        </div>
+                    </div>
+                    <div id="wd-status" class="kn-status"></div>
+                    <div id="wd-stats" class="res-cards"></div>
+                    <div id="wd-running"></div>
+                    <div id="wd-accs"></div>
+                    <h3 style="margin:22px 0 10px">История</h3>
+                    <div class="kn-toolbar">
+                        <button class="kn-chip active" data-wf="all">Все</button>
+                        <button class="kn-chip" data-wf="success">Успешные</button>
+                        <button class="kn-chip" data-wf="problems">Проблемы</button>
+                    </div>
+                    <div id="wd-history"></div>
                 </div>
             </section>
 
