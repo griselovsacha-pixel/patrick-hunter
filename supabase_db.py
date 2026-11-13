@@ -340,3 +340,27 @@ class SupabaseStore:
             },
             extra_headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
         )
+
+    # ---------- автовывод (withdraw.py) ----------
+    @staticmethod
+    def _withdraw_payload(job):
+        keys = ("gift_code", "gift_emoji", "gift_name", "stars", "friend_id", "status", "error",
+                "balance_before", "balance_after", "steps", "bot_response", "finished_at")
+        return {k: job.get(k) for k in keys}
+
+    async def withdraw_create(self, job):
+        if not self.enabled or not self.session:
+            return None
+        p = self._withdraw_payload(job)
+        p["account_number"] = self._account_number()
+        p["created_at"] = job.get("created_at")
+        rows = await self._request("POST", "/rest/v1/withdrawals", payload=p,
+                                   extra_headers={"Prefer": "return=representation"})
+        return rows[0]["id"] if rows else None
+
+    async def withdraw_update(self, wid, job):
+        if not self.enabled or not self.session:
+            return
+        await self._request("PATCH", "/rest/v1/withdrawals", params={"id": f"eq.{wid}"},
+                            payload=self._withdraw_payload(job),
+                            extra_headers={"Prefer": "return=minimal"})
