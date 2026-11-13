@@ -811,3 +811,24 @@ tbody tr:hover {
 .res-t{font-size:12px;opacity:.65}.res-v{font-size:22px;font-weight:700;margin:4px 0}.res-s{font-size:11px;opacity:.6}
 .res-notes{font-size:13px;opacity:.85;display:flex;flex-direction:column;gap:4px;margin-bottom:14px}
 .res-chart{position:relative;height:300px}
+
+/* Выводы */
+.wd-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:10px;margin:12px 0}
+.wd-gift{border:1px solid var(--border);border-radius:var(--radius);padding:12px;text-align:center;background:var(--card);transition:.15s}
+.wd-gift.cant{opacity:.38;filter:grayscale(.8)}
+.wd-gift.can{cursor:pointer;border-color:rgba(53,208,127,.55);background:linear-gradient(160deg,rgba(53,208,127,.14),rgba(124,92,255,.10));box-shadow:0 0 14px rgba(53,208,127,.12)}
+.wd-gift.can:hover{transform:translateY(-2px)}
+.wd-gift.sel{border-color:var(--accent-light);box-shadow:0 0 0 2px var(--accent)}
+.wd-emoji{font-size:34px;line-height:1.2}.wd-gname{font-size:13px;margin-top:4px}
+.wd-price{font-weight:700;margin-top:2px}.wd-why{font-size:11px;color:var(--muted);margin-top:4px}
+.wd-gift.can .wd-why{color:var(--green)}
+.wd-badge{font-size:12px;padding:2px 8px;border-radius:6px;white-space:nowrap}
+.wd-b-ok{background:rgba(53,208,127,.2)}.wd-b-bad{background:rgba(255,92,108,.2)}
+.wd-b-warn{background:rgba(255,173,77,.22)}.wd-b-run{background:rgba(77,163,255,.22)}
+.wd-table{width:100%;border-collapse:collapse;font-size:13px}
+.wd-table th,.wd-table td{text-align:left;padding:8px;border-bottom:1px solid var(--border);vertical-align:top}
+.wd-err{color:var(--red);font-size:12px;margin-top:4px}
+.wd-step{font-size:12px;color:var(--muted);margin:2px 0}.wd-step span{opacity:.6;margin-right:6px}
+.wd-step-bad{color:var(--red)}
+.wd-run{border:1px solid rgba(77,163,255,.5);border-radius:var(--radius);padding:12px;margin:14px 0;background:rgba(77,163,255,.08)}
+.kn-flow{background:rgba(237,107,202,.25)}
