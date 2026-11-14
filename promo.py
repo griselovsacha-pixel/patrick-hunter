@@ -23,7 +23,10 @@ from config import (
     TARGET_BOT, PROMO_KEYWORDS, PROMO_REJECT_KEYWORDS,
     PROMO_MAX_ATTEMPTS, PROMO_RETRY_DELAY_RANGE,
 )
-from utils import find_promo_in_text, extract_start_links, find_button, human_delay, BoundedSet, parse_tme_target
+from utils import (
+    find_promo_in_text, extract_start_links, button_texts, find_button, human_delay,
+    BoundedSet, parse_tme_target,
+)
 from antiban import safe_call, TooManyFloodWaitsError
 from core import utcnow
 from checks import CHECK_WORDS
@@ -64,6 +67,15 @@ class PromoHunter:
         logger.info(f"📨 [{self.label}] Канал: {raw[:120]}")
         handled = False
 
+        # Чеки — самое срочное: обрабатываем первыми. Чек забирает один аккаунт
+        # (кто первым увидел пост — см. hub.claim_check), остальные тихо пропускают.
+        if self.checks:
+            ctx = low + " " + button_texts(message)
+            for bot, payload in extract_start_links(message):
+                if self.checks.is_check_link(bot, payload, ctx):
+                    handled = True
+                    self.checks.submit(bot, payload)
+
         code = find_promo_in_text(raw)
         if code:
             handled = True
@@ -73,14 +85,6 @@ class PromoHunter:
             if self.hub:
                 self.hub.share_promo(self.label, code)
             self.submit(code)
-
-        if self.checks:
-            for bot, payload in extract_start_links(message):
-                if self.checks.is_check_link(bot, payload, low):
-                    handled = True
-                    if self.hub:
-                        self.hub.share_check(self.label, bot, payload)
-                    self.checks.submit(bot, payload)
 
         if not handled and self._looks_relevant(low):
             key = (message.id, hash(raw))
