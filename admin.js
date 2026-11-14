@@ -202,6 +202,63 @@ function renderTotals() {
         formatNumber(totals.daily);
 }
 
+// ---------------- Прокси аккаунтов ----------------
+
+const PROXY_LABELS = {
+    ok: "Работает", slow: "Медленный", dead: "Не работает",
+    none: "Без прокси", unknown: "Не проверен",
+};
+
+function proxyBadge(p) {
+    const st = (p && p.status) || "unknown";
+    const cls = st === "ok" ? "online" : st === "dead" ? "offline" : st === "slow" ? "warning" : "neutral";
+    return `<span class="badge ${cls}">${PROXY_LABELS[st] || st}</span>`;
+}
+
+function proxyAddress(p) {
+    if (!p || !p.configured) return `<span class="proxy-sub">прямое соединение</span>`;
+    const ip = p.exit_ip ? `<div class="proxy-sub">IP выхода: ${escapeHtml(p.exit_ip)}</div>` : "";
+    return `<div>${escapeHtml(p.display || "—")}${p.auth ? " 🔑" : ""}</div>${ip}`;
+}
+
+function proxyDetails(p) {
+    if (!p) return "";
+    const parts = [];
+    if (p.latency_ms != null) parts.push(`до Telegram ${p.latency_ms} мс`);
+    if (p.client_ping_ms != null) parts.push(`пинг аккаунта ${p.client_ping_ms} мс`);
+    if (p.error) parts.push(escapeHtml(p.error));
+    if (p.checked_at) parts.push(`проверено ${formatDate(p.checked_at)}`);
+    return parts.length ? `<div class="proxy-sub">${parts.join(" · ")}</div>` : "";
+}
+
+async function checkProxies(accountNumber) {
+    const buttons = document.querySelectorAll("[data-proxy-check], #proxy-check-all");
+    buttons.forEach(b => { b.disabled = true; });
+    $("proxy-status").textContent = "Проверяю прокси…";
+    try {
+        const r = await fetch(`/api/admin/proxies/check?account=${accountNumber || 0}`,
+            { method: "POST", credentials: "same-origin" });
+        if (!r.ok) {
+            let m = "HTTP " + r.status;
+            try { m = (await r.json()).detail || m; } catch (_) {}
+            throw new Error(m);
+        }
+        const data = await r.json();
+        (data.accounts || []).forEach(a => {
+            const row = (dashboardData.accounts || []).find(x => Number(x.account_number) === a.account);
+            if (row) row.proxy = a.proxy;
+        });
+        $("proxy-status").textContent = "";
+        renderAccounts();
+        renderAccountsTable();
+    } catch (e) {
+        $("proxy-status").textContent = "Не удалось проверить прокси: " + e.message;
+    } finally {
+        // кнопки в таблице пересоздаются, а «Проверить все» — статичная: включаем обратно всегда
+        document.querySelectorAll("[data-proxy-check], #proxy-check-all").forEach(b => { b.disabled = false; });
+    }
+}
+
 function renderAccounts() {
     const container = $("accounts-preview");
     const accounts = dashboardData.accounts || [];
@@ -241,6 +298,8 @@ function renderAccounts() {
 
                     ${online ? "Онлайн" : "Оффлайн"}
 
+                    ${proxyBadge(account.proxy)}
+
                 </div>
 
             </div>
@@ -255,7 +314,7 @@ function renderAccountsTable() {
     if (!accounts.length) {
         tbody.innerHTML = `
             <tr>
-                <td colspan="5">
+                <td colspan="7">
                     <div class="empty">
                         Аккаунтов нет
                     </div>
@@ -295,6 +354,17 @@ function renderAccountsTable() {
                 </td>
 
                 <td>
+                    ${proxyAddress(account.proxy)}
+                </td>
+
+                <td>
+                    ${proxyBadge(account.proxy)}
+                    ${proxyDetails(account.proxy)}
+                    <button class="kn-btn proxy-btn"
+                        data-proxy-check="${escapeHtml(account.account_number)}">Проверить</button>
+                </td>
+
+                <td>
                     ${formatDate(
                         account.last_connected_at
                     )}
@@ -309,6 +379,12 @@ function renderAccountsTable() {
             </tr>
         `;
     }).join("");
+
+    tbody.querySelectorAll("[data-proxy-check]").forEach(b => {
+        b.onclick = () => checkProxies(Number(b.dataset.proxyCheck));
+    });
+    const all = $("proxy-check-all");
+    if (all) all.onclick = () => checkProxies(0);
 }
 
 function renderActivity() {
