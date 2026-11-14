@@ -58,10 +58,26 @@ CHECK_BOTS = {
     b.strip().lower().lstrip("@")
     for b in os.getenv(
         "CHECK_BOTS",
-        "send,CryptoBot,xRocket,tonRocketBot,wallet,patrickstarsrobot",
+        "send,CryptoBot,xRocket,tonRocketBot,wallet,patrickstarsrobot,patrickshoprobot",
     ).split(",")
     if b.strip()
 }
+# Магазин Патрика — именно из него канал раздаёт «Чек на N ⭐» (пост «через
+# @patrickshoprobot» с URL-кнопкой «Получить»). Добавляем принудительно: раньше
+# его не было в списке (а на Render мог быть задан свой CHECK_BOTS без него) —
+# поэтому такие чеки вообще не ловились.
+SHOP_BOT = "patrickshoprobot"
+CHECK_BOTS.add(SHOP_BOT)
+
+# Боты, чей username резолвим заранее при старте аккаунта (экономит ~0.2-0.5с
+# на первом чеке). Через запятую в env CHECK_WARM_BOTS можно добавить свои.
+CHECK_WARM_BOTS = {SHOP_BOT} | {
+    b.strip().lower().lstrip("@")
+    for b in os.getenv("CHECK_WARM_BOTS", "").split(",") if b.strip()
+}
+
+# Подписи кнопки «забрать чек» в ответе бота-магазина (без регистра, по вхождению).
+CHECK_CLAIM_WORDS = ["получить", "забрать", "активир", "claim", "collect", "забр"]
 
 # --- Несколько аккаунтов ---
 MAX_ACCOUNTS = int(os.getenv("MAX_ACCOUNTS", "5"))
