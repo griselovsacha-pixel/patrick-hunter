@@ -34,6 +34,7 @@ from daily import DailyClaimer
 from tasks import TaskRunner
 from promo import PromoHunter
 from checks import CheckHunter
+from proxy_check import ProxyMonitor
 from watcher import ChannelWatcher
 from clicker import Clicker
 from supabase_db import SupabaseStore
@@ -55,12 +56,15 @@ class PatrickAccount:
 
         from proxy_conf import proxy_for
         digits = "".join(ch for ch in label if ch.isdigit())
+        self.number = int(digits or "1")
         self.client = TelegramClient(
             StringSession(session_string),
             API_ID,
             API_HASH,
-            proxy=proxy_for(int(digits or "1")),
+            proxy=proxy_for(self.number),
         )
+        # Статус прокси для админки (проверка раз в 5 мин + ручная кнопка)
+        self.proxy = ProxyMonitor(self.number, self.client, label)
 
         self.bot_lock = PriorityLock()
         self.tg_logger = TgLogger(self.client, label, self.db)
@@ -115,6 +119,7 @@ class PatrickAccount:
 
         self._background_tasks = []
         self._bot_dm_handler = None
+        self._warmup_task = None
 
     # ------------------------------------------------------------------
     async def start(self):
@@ -130,8 +135,11 @@ class PatrickAccount:
 
         # Ловля промо/чеков поднимается РАНЬШЕ всего остального (био, баланс,
         # приветственный лог) — это самая срочная функция аккаунта.
+        self.checks.install()  # событийное ожидание ответов бота-магазина
         await self.watcher.start()
         self.ready = True
+        # Прогрев: резолвим бота-магазин заранее, чтобы первый чек не терял время
+        self._warmup_task = asyncio.create_task(self.checks.warmup())
         try:
             await self.client.catch_up()
         except Exception as e:
@@ -159,6 +167,7 @@ class PatrickAccount:
             asyncio.create_task(self._supervised("clicker", self.clicker.run_forever)),
             asyncio.create_task(self._supervised("stats", self._stats_cycle)),
             asyncio.create_task(self._supervised("watchdog", self._watchdog)),
+            asyncio.create_task(self._supervised("proxy", self.proxy.run_forever)),
         ]
         if self.crawler:
             self._background_tasks.append(
@@ -271,6 +280,10 @@ class PatrickAccount:
             self._background_tasks_delayed.cancel()
         except Exception:
             pass
+        if self._warmup_task is not None:
+            self._warmup_task.cancel()
+            self._warmup_task = None
+        self.checks.uninstall()
         for task in self._background_tasks:
             task.cancel()
         self._background_tasks = []
