@@ -134,6 +134,8 @@ alter table "resource_samples" add column if not exists "accounts" integer;
 
 alter table "resource_samples" add column if not exists "tasks" integer;
 
+alter table "resource_samples" add column if not exists "boot" bigint;
+
 alter table "bot_knowledge" add column if not exists "fingerprint" text;
 
 alter table "bot_knowledge" add column if not exists "kind" text not null default 'screen';
