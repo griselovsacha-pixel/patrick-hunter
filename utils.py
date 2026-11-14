@@ -75,6 +75,15 @@ def collect_urls(message) -> list:
     return urls
 
 
+def button_texts(message) -> str:
+    """Подписи всех кнопок под постом (нижний регистр) — «Получить 111 ⭐» и т.п."""
+    try:
+        rows = message.buttons or []
+    except Exception:
+        rows = []
+    return " ".join((getattr(b, "text", "") or "").lower() for row in rows for b in row)
+
+
 def extract_start_links(message) -> list:
     """[(bot_username_lower, payload), ...] из ссылок вида
     t.me/<bot>?start=<payload> / tg://resolve?domain=<bot>&start=<payload>.
