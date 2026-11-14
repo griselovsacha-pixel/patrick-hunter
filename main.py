@@ -834,6 +834,18 @@ async def admin_session_cancel(sid: str, authorization: str | None = Header(defa
     return {"ok": True}
 
 
+@app.post("/api/admin/refresh-profile")
+async def admin_refresh_profile(account: int, authorization: str | None = Header(default=None)):
+    """Открыть Профиль в боте и обновить баланс / друзей / активировавших."""
+    check_admin_auth(authorization)
+    acc = next((a for a in accounts if _acc_number(a) == account), None)
+    if not acc or not acc.ready:
+        raise HTTPException(status_code=503, detail="Аккаунт не найден или ещё запускается")
+    ok = await acc._refresh_real_balance()
+    ps = acc.profile_stats
+    return {"ok": bool(ok), "balance": ps.balance, "friends": ps.friends, "activated": ps.activated}
+
+
 @app.post("/api/admin/withdraw")
 async def admin_withdraw(account: int, gift: str, authorization: str | None = Header(default=None)):
     check_admin_auth(authorization)
@@ -866,6 +878,7 @@ async def admin_withdrawals(limit: int = 200, authorization: str | None = Header
         accs.append({
             "account": _acc_number(a), "label": a.label, "ready": bool(a.ready),
             "balance": round(float(ps.balance or 0), 2), "friends": ps.friends, "activated": ps.activated,
+            "known": bool(getattr(ps, "balance_updated_at", None)), "min_activated": wd.MIN_ACTIVATED,
         })
     done = [h for h in history if h.get("status") == "success"]
     return {
