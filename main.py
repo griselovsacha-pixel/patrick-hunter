@@ -745,6 +745,35 @@ async def admin_run(account: int, job: str, authorization: str | None = Header(d
     return {"ok": True}
 
 
+def _proxy_public(acc) -> dict:
+    """Состояние прокси аккаунта для админки (без логина/пароля)."""
+    mon = getattr(acc, "proxy", None)
+    state = dict(mon.state) if mon else {"configured": False, "status": "unknown"}
+    state["connected"] = bool(acc.client.is_connected())
+    return state
+
+
+@app.get("/api/admin/proxies")
+async def admin_proxies(authorization: str | None = Header(default=None)):
+    check_admin_auth(authorization)
+    return {"accounts": [
+        {"account": _acc_number(a), "label": a.label, "proxy": _proxy_public(a)} for a in accounts
+    ]}
+
+
+@app.post("/api/admin/proxies/check")
+async def admin_proxies_check(account: int = 0, authorization: str | None = Header(default=None)):
+    """Проверить прокси сейчас: account=N — один аккаунт, 0 — все."""
+    check_admin_auth(authorization)
+    targets = [a for a in accounts if account in (0, _acc_number(a))]
+    if not targets:
+        raise HTTPException(status_code=404, detail="Аккаунт не найден")
+    await asyncio.gather(*(a.proxy.refresh() for a in targets), return_exceptions=True)
+    return {"accounts": [
+        {"account": _acc_number(a), "label": a.label, "proxy": _proxy_public(a)} for a in targets
+    ]}
+
+
 @app.post("/api/admin/probe-withdraw")
 async def admin_probe_withdraw(account: int, authorization: str | None = Header(default=None)):
     check_admin_auth(authorization)
@@ -985,6 +1014,7 @@ async def admin_overview(
     )
 
     runtime_status = {}
+    proxy_status = {}
 
     for acc in accounts:
         try:
@@ -999,6 +1029,7 @@ async def admin_overview(
             runtime_status[number] = bool(
                 acc.client.is_connected()
             )
+            proxy_status[number] = _proxy_public(acc)
 
         except Exception:
             continue
@@ -1008,6 +1039,8 @@ async def admin_overview(
             row.get("account_number")
             or 0
         )
+
+        row["proxy"] = proxy_status.get(number)
 
         if number in runtime_status:
             row["connected"] = (
