@@ -32,6 +32,7 @@ from utils import find_button_by_data, human_delay
 logger = logging.getLogger(__name__)
 
 FRIEND_ID = os.getenv("WITHDRAW_FRIEND_ID", "5458870502")
+MIN_ACTIVATED = 5   # условие бота: минимум 5 друзей, активировавших бота
 ENABLED = os.getenv("WITHDRAW_ENABLED", "1") != "0"
 
 # Каталог подарков экрана «Подарить другу». Порядок и эмодзи — по экрану бота
@@ -87,6 +88,10 @@ class WithdrawManager:
             raise ValueError("Неизвестный подарок")
         if self.current is not None:
             raise RuntimeError("Уже идёт другой вывод")
+        ps = acc.profile_stats
+        if getattr(ps, "balance_updated_at", None) and int(ps.activated or 0) < MIN_ACTIVATED:
+            raise RuntimeError(
+                f"Бот выводит от {MIN_ACTIVATED} друзей, активировавших бота (сейчас {int(ps.activated or 0)})")
         job = {
             "account": int("".join(ch for ch in acc.label if ch.isdigit()) or "1"),
             "label": acc.label, "gift_code": code, "gift_emoji": gift["emoji"],
@@ -219,10 +224,14 @@ async def _flow(acc, job, save):
         await safe_call(lambda: core.client.send_message(core_target(), friend), action="withdraw_send_id")
         conf = await core.wait_fresh(
             since, timeout=20,
-            predicate=lambda m: bool(find_button_by_data(m, prefixes=("giftsendtofriend_calback:",))))
+            predicate=lambda m: bool(find_button_by_data(m, prefixes=("giftsendtofriend_calback:",)))
+            or "❌" in (m.text or "") or "нужно" in (m.text or "").lower())
         if not conf:
-            return _fail(job, "бот не прислал запрос подтверждения после ID", "отправка ID")
+            return _fail(job, "бот не ответил на ID друга", "отправка ID")
         cbtn = find_button_by_data(conf, prefixes=("giftsendtofriend_calback:",))
+        if not cbtn:
+            refusal = " ".join((conf.text or "").split())[:200]
+            return _fail(job, f"бот отказал после ID: {refusal}", "отправка ID")
         data = bytes(cbtn.data).decode("utf-8", "ignore")
         conf_text = conf.text or ""
         _step(job, "бот запросил подтверждение", True, conf_text[:100].replace("\n", " "))
