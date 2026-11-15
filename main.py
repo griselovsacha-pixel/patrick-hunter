@@ -726,7 +726,8 @@ async def admin_jobs(authorization: str | None = Header(default=None)):
         }
         if not getattr(acc, "crawler", None):
             snap.pop("crawler", None)
-        out.append({"account": _acc_number(acc), "label": acc.label, "ready": bool(acc.ready), "jobs": snap})
+        out.append({"account": _acc_number(acc), "label": acc.label, "ready": bool(acc.ready), "jobs": snap,
+                    "warmup": sched.warmup_info()})
     return {"accounts": out, "titles": JOB_TITLES}
 
 
@@ -847,14 +848,15 @@ async def admin_refresh_profile(account: int, authorization: str | None = Header
 
 
 @app.post("/api/admin/withdraw")
-async def admin_withdraw(account: int, gift: str, authorization: str | None = Header(default=None)):
+async def admin_withdraw(account: int, gift: str, mode: str = "friend", friend_id: str = "",
+                         authorization: str | None = Header(default=None)):
     check_admin_auth(authorization)
     import withdraw as wd
     acc = next((a for a in accounts if _acc_number(a) == account), None)
     if not acc or not acc.ready:
         raise HTTPException(status_code=503, detail="Аккаунт не найден или ещё запускается")
     try:
-        job = await wd.manager.start(acc, gift)
+        job = await wd.manager.start(acc, gift, mode, friend_id or None)
     except (ValueError, RuntimeError) as e:
         raise HTTPException(status_code=409, detail=str(e))
     return {"ok": True, "job": job}
