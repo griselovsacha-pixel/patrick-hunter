@@ -23,7 +23,8 @@ MISSED_MIN = int(os.getenv("SCHED_MISSED_MIN_SEC", "180"))
 MISSED_MAX = int(os.getenv("SCHED_MISSED_MAX_SEC", "900"))
 ACCOUNT_STAGGER = int(os.getenv("SCHED_ACCOUNT_STAGGER_SEC", "240"))
 
-JOBS = ("daily", "tasks", "clicker", "crawler")
+JOBS = ("daily", "tasks", "clicker", "crawler", "warmup")   # warmup — служебная запись (дата начала прогрева)
+WARMUP_MIN_FACTOR = float(os.getenv("WARMUP_MIN_FACTOR", "0.2"))   # доля обычной нагрузки в первый день прогрева
 
 
 def _now():
@@ -48,6 +49,14 @@ class JobScheduler:
                           "running": False, "data": {}} for j in JOBS}
         self.handlers = {}   # job -> callable() -> bool (запустить сейчас)
         self._loaded = False
+        digits = "".join(ch for ch in label if ch.isdigit())
+        self.number = int(digits or "1")
+        # Прогрев: ACCOUNT_<N>_WARMUP_DAYS=5 (0/не задано — выключен). Нагрузка растёт от
+        # WARMUP_MIN_FACTOR до 100% за указанное число дней, отсчёт — с первого запуска аккаунта.
+        try:
+            self.warmup_days = max(0, int(os.getenv(f"ACCOUNT_{self.number}_WARMUP_DAYS", "0") or 0))
+        except ValueError:
+            self.warmup_days = 0
 
     # ---------- БД ----------
     async def load(self):
@@ -58,7 +67,7 @@ class JobScheduler:
             rows = await self.db.job_load() or []
         except Exception as e:
             logger.warning("[%s] расписание: не удалось прочитать БД (%s) — живём в памяти", self.label, e)
-            return
+            rows = []
         for r in rows:
             st = self.state.get(r.get("job"))
             if st is None:
@@ -68,6 +77,7 @@ class JobScheduler:
             st["status"] = r.get("last_status")
             st["message"] = r.get("last_message")
             st["data"] = r.get("data") or {}
+        await self._warmup_boot()
 
     async def _save(self, job):
         st = self.state[job]
@@ -80,6 +90,41 @@ class JobScheduler:
             )
         except Exception as e:
             logger.debug("[%s] расписание: не сохранить %s: %s", self.label, job, e)
+
+    # ---------- прогрев ----------
+    async def _warmup_boot(self):
+        if self.warmup_days <= 0:
+            return
+        data = self.state["warmup"]["data"] or {}
+        if not data.get("start"):
+            data = {"start": _now().isoformat(), "days": self.warmup_days}
+            self.state["warmup"]["data"] = data
+            await self._save("warmup")
+            logger.info("[%s] прогрев: старт, %d дн.", self.label, self.warmup_days)
+
+    def warmup_factor(self) -> float:
+        """Доля обычной нагрузки: 1.0 — полная (прогрев выключен или закончен)."""
+        if self.warmup_days <= 0:
+            return 1.0
+        start = _parse((self.state["warmup"]["data"] or {}).get("start"))
+        if not start:
+            return WARMUP_MIN_FACTOR
+        days = (_now() - start).total_seconds() / 86400
+        if days >= self.warmup_days:
+            return 1.0
+        return WARMUP_MIN_FACTOR + (1.0 - WARMUP_MIN_FACTOR) * max(days, 0) / self.warmup_days
+
+    def slowdown(self) -> float:
+        """Во сколько раз реже запускать периодические задачи (1.0 — как обычно)."""
+        return 1.0 + 2.0 * (1.0 - self.warmup_factor())
+
+    def warmup_info(self) -> dict:
+        f = self.warmup_factor()
+        start = _parse((self.state["warmup"]["data"] or {}).get("start"))
+        day = int((_now() - start).total_seconds() // 86400) + 1 if start else 1
+        return {"enabled": self.warmup_days > 0, "active": f < 1.0, "days": self.warmup_days,
+                "day": min(day, self.warmup_days) if self.warmup_days else 0,
+                "factor": round(f, 2), "start": start.isoformat() if start else None}
 
     # ---------- план ----------
     async def plan_initial(self, job: str, first_range=(300, 900)) -> float:
@@ -97,6 +142,9 @@ class JobScheduler:
         else:
             delay = (st["next"] - now).total_seconds()
             why = "по сохранённому расписанию"
+        if self.warmup_factor() < 1.0 and why != "по сохранённому расписанию":
+            delay *= 1.0 + 5.0 * (1.0 - self.warmup_factor())
+            why += ", прогрев — позже"
         logger.info("[%s] расписание %s: через %d с (%s)", self.label, job, delay, why)
         await self.set_next(job, delay)
         return delay
@@ -141,6 +189,8 @@ class JobScheduler:
     def snapshot(self) -> dict:
         out = {}
         for job, st in self.state.items():
+            if job == "warmup":
+                continue
             out[job] = {
                 "next": st["next"].isoformat() if st["next"] else None,
                 "last": st["last"].isoformat() if st["last"] else None,
