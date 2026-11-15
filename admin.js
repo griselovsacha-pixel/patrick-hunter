@@ -174,7 +174,7 @@ function renderTotals() {
         $("real-balance").textContent =
             `${formatStars(
                 balance.real_balance ??
-                dashboardData.real_balance ??
+                (dashboardData.real_balance || {}).current_balance ??
                 0
             )} ⭐`;
     }
@@ -182,6 +182,7 @@ function renderTotals() {
     if ($("balance-delta")) {
         const delta =
             balance.today_delta ??
+            (dashboardData.real_balance || {}).delta_today ??
             dashboardData.balance_delta_today ??
             0;
 
@@ -1044,7 +1045,13 @@ async function loadControl() {
                         ${(!a.ready || s.running || !s.manual) ? "disabled" : ""}>${btn}</button>
                 </div>`;
             }).join("");
-            return `<div class="ctl-acc"><h3>${escapeHtml(a.label)} ${a.ready ? "" : "<i>(запускается…)</i>"}</h3>
+            const w = a.warmup;
+            const warm = w && w.enabled
+                ? (w.active
+                    ? `<div class="wd-warm">🌱 Прогрев: день ${w.day} из ${w.days} · нагрузка ${Math.round(w.factor * 100)}% от обычной (клики и задания реже, первый запуск позже)</div>`
+                    : `<div class="wd-warm done">✅ Прогрев завершён (${w.days} дн.)</div>`)
+                : "";
+            return `<div class="ctl-acc"><h3>${escapeHtml(a.label)} ${a.ready ? "" : "<i>(запускается…)</i>"}</h3>${warm}
                 <div class="ctl-jobs">${jobs}</div>
                 <button class="kn-btn" data-probe="${a.account}" ${a.ready ? "" : "disabled"}
                     title="Нажимает минимальную сумму вывода только если бот гарантированно откажет">Проба вывода (безопасно)</button></div>`;
@@ -1216,7 +1223,20 @@ document.addEventListener(
 
 
 // ---------------- Выводы ----------------
-let wdData = null, wdFilter = "all", wdTimer = null, wdSel = {};
+let wdData = null, wdFilter = "all", wdTimer = null, wdSel = {}, wdRefreshed = {}, wdMode = {}, wdFriend = {};
+
+async function wdRefreshProfile(acc) {
+    $("wd-status").textContent = "Читаю профиль в боте…";
+    try {
+        const r = await fetch(`/api/admin/refresh-profile?account=${acc}`, { method: "POST", credentials: "same-origin" });
+        if (!r.ok) throw new Error("HTTP " + r.status);
+    } catch (e) {
+        $("wd-status").textContent = "Не удалось прочитать профиль: " + e.message;
+        return;
+    }
+    $("wd-status").textContent = "";
+    await loadWithdraw(true);
+}
 
 const WD_STATUS = {
     running: ["⏳ идёт", "wd-b-run"], success: ["✅ успешно", "wd-b-ok"],
@@ -1234,13 +1254,23 @@ function wdSteps(steps) {
          ${s.ok ? "✓" : "✗"} <b>${escapeHtml(s.step)}</b> ${escapeHtml(s.detail || "")}</div>`).join("");
 }
 
-async function loadWithdraw() {
+async function loadWithdraw(noAuto) {
     try {
         const r = await fetch("/api/admin/withdrawals", { credentials: "same-origin", cache: "no-store" });
         if (!r.ok) throw new Error("HTTP " + r.status);
         wdData = await r.json();
         $("wd-status").textContent = "";
         renderWithdraw();
+        // после рестарта данные профиля пусты до первого чтения — читаем один раз за визит
+        if (!noAuto) {
+            for (const a of wdData.accounts) {
+                if (a.ready && !a.known && !wdRefreshed[a.account]) {
+                    wdRefreshed[a.account] = true;
+                    wdRefreshProfile(a.account);
+                    break;
+                }
+            }
+        }
     } catch (e) {
         $("wd-status").textContent = "Не удалось загрузить: " + e.message;
     }
@@ -1254,7 +1284,7 @@ async function loadWithdraw() {
 
 function renderWithdraw() {
     const d = wdData, sm = d.summary;
-    $("wd-sub").textContent = `Подарок другу ${d.friend_id}: Вывод звезд → Подарить другу → ID → Подтвердить`;
+    $("wd-sub").textContent = "Вывод себе или подарком другу (любой Telegram ID). Друг: Вывод звезд → Подарить другу → ID → Подтвердить";
     $("wd-stats").innerHTML = [
         ["Успешных", sm.success], ["Выведено ⭐", formatStars(sm.stars_out)],
         ["Не подтверждено", sm.unverified], ["Ошибок", sm.failed]
@@ -1262,31 +1292,53 @@ function renderWithdraw() {
 
     const run = d.running;
     $("wd-running").innerHTML = run ? `<div class="wd-run"><b>⏳ ${escapeHtml(run.label)}: ${run.gift_emoji}
-        ${escapeHtml(run.gift_name)} ${run.stars}⭐ → ${escapeHtml(run.friend_id)}</b>${wdSteps(run.steps)}</div>` : "";
+        ${escapeHtml(run.gift_name)} ${run.stars}⭐ → ${run.mode === "self" ? "себе" : escapeHtml(run.friend_id)}</b>${wdSteps(run.steps)}</div>` : "";
 
     $("wd-accs").innerHTML = d.accounts.map(a => {
         const sel = wdSel[a.account];
+        const mode = wdMode[a.account] || "friend";
+        const fid = wdFriend[a.account] ?? d.friend_id;
         const gifts = d.gifts.map(g => {
+            const price = mode === "self" ? g.self_stars : g.stars;
+            const lowFriends = a.known && a.activated < a.min_activated;
             const why = !d.enabled ? "автовывод выключен" : !a.ready ? "аккаунт запускается"
-                : run ? "идёт другой вывод" : a.balance < g.stars ? `не хватает ${(g.stars - a.balance).toFixed(2)}⭐` : "";
+                : !a.known ? "нет данных профиля"
+                : lowFriends ? `нужно ${a.min_activated} друзей (есть ${a.activated})`
+                : run ? "идёт другой вывод"
+                : !price ? "недоступно в этом режиме"
+                : a.balance < price ? `не хватает ${(price - a.balance).toFixed(2)}⭐` : "";
             const can = !why;
             return `<div class="wd-gift ${can ? "can" : "cant"} ${sel === g.code ? "sel" : ""}" data-acc="${a.account}"
                 data-code="${g.code}" data-can="${can ? 1 : 0}">
                 <div class="wd-emoji">${g.emoji}</div><div class="wd-gname">${escapeHtml(g.name)}</div>
-                <div class="wd-price">${g.stars}⭐</div><div class="wd-why">${can ? "можно вывести" : escapeHtml(why)}</div></div>`;
+                <div class="wd-price">${price || "—"}${price ? "⭐" : ""}</div><div class="wd-why">${can ? "можно вывести" : escapeHtml(why)}</div></div>`;
         }).join("");
         const g = d.gifts.find(x => x.code === sel);
         return `<div class="ctl-acc"><h3>${escapeHtml(a.label)}</h3>
-            <div class="ctl-line">Баланс: <b>${a.balance}⭐</b> · друзей: ${a.friends} · активировали: ${a.activated}
-            <span style="opacity:.6">(данные последнего обновления профиля)</span></div>
+            <div class="ctl-line">${a.known
+                ? `Баланс: <b>${a.balance}⭐</b> · друзей: ${a.friends} · активировали: ${a.activated}`
+                : `<b>Данных профиля пока нет</b> (после рестарта читаются из бота)`}
+            <button class="kn-btn proxy-btn" data-refresh="${a.account}" ${a.ready ? "" : "disabled"}>Обновить из бота</button></div>
+            <div class="wd-mode">
+                <button class="kn-chip ${mode === "friend" ? "active" : ""}" data-mode="${a.account}:friend">🎁 Другу</button>
+                <button class="kn-chip ${mode === "self" ? "active" : ""}" data-mode="${a.account}:self">⭐ Себе</button>
+                ${mode === "friend" ? `<input class="kn-search wd-fid" data-fid="${a.account}" value="${escapeHtml(fid)}"
+                    placeholder="Telegram ID друга" inputmode="numeric" autocomplete="off">` : ""}
+            </div>
             <div class="wd-grid">${gifts}</div>
             <button class="kn-btn kn-primary" data-go="${a.account}" ${(g && !run) ? "" : "disabled"}>
-                ${g ? `Вывести ${g.emoji} ${g.stars}⭐ другу ${escapeHtml(d.friend_id)}` : "Выбери подарок"}</button></div>`;
+                ${g ? `Вывести ${g.emoji} ${mode === "self" ? g.self_stars : g.stars}⭐ ${mode === "self" ? "себе" : "другу " + escapeHtml(fid)}` : "Выбери подарок"}</button></div>`;
     }).join("");
     document.querySelectorAll(".wd-gift[data-can='1']").forEach(el => el.onclick = () => {
         wdSel[el.dataset.acc] = el.dataset.code; renderWithdraw();
     });
     document.querySelectorAll("button[data-go]").forEach(b => b.onclick = () => startWithdraw(b.dataset.go));
+    document.querySelectorAll("button[data-mode]").forEach(b => b.onclick = () => {
+        const [acc, m] = b.dataset.mode.split(":");
+        wdMode[acc] = m; wdSel[acc] = null; renderWithdraw();
+    });
+    document.querySelectorAll("input[data-fid]").forEach(i => i.oninput = () => { wdFriend[i.dataset.fid] = i.value.trim(); });
+    document.querySelectorAll("button[data-refresh]").forEach(b => b.onclick = () => wdRefreshProfile(b.dataset.refresh));
 
     let rows = d.history;
     if (wdFilter === "success") rows = rows.filter(h => h.status === "success");
@@ -1294,7 +1346,7 @@ function renderWithdraw() {
     $("wd-history").innerHTML = rows.length ? `<table class="wd-table"><thead><tr><th>Когда</th><th>Акк.</th>
         <th>Подарок</th><th>Баланс</th><th>Статус</th></tr></thead><tbody>` + rows.map(h => `<tr>
         <td>${formatDate(h.created_at)}</td><td>#${h.account_number ?? ""}</td>
-        <td>${escapeHtml(h.gift_emoji || "")} ${escapeHtml(h.gift_name || "")} ${h.stars}⭐ → ${escapeHtml(h.friend_id || "")}</td>
+        <td>${escapeHtml(h.gift_emoji || "")} ${escapeHtml(h.gift_name || "")} ${h.stars}⭐ → ${h.mode === "self" ? "себе" : escapeHtml(h.friend_id || "")}</td>
         <td>${h.balance_before ?? "?"} → ${h.balance_after ?? "?"}</td>
         <td>${wdBadge(h.status)}${h.error ? `<div class="wd-err">${escapeHtml(h.error)}</div>` : ""}
         <details><summary>шаги</summary>${wdSteps(h.steps)}${h.bot_response ? `<div class="wd-step">Ответ бота: ${escapeHtml(h.bot_response)}</div>` : ""}</details></td></tr>`).join("")
@@ -1313,9 +1365,13 @@ async function startWithdraw(acc) {
     const code = wdSel[acc];
     const g = wdData.gifts.find(x => x.code === code);
     if (!g) return;
-    if (!confirm(`Вывести ${g.emoji} ${g.name} за ${g.stars}⭐ другу ${wdData.friend_id}?\nЗвёзды будут списаны по-настоящему.`)) return;
+    const mode = wdMode[acc] || "friend";
+    const fid = (wdFriend[acc] ?? wdData.friend_id) || "";
+    const price = mode === "self" ? g.self_stars : g.stars;
+    if (mode === "friend" && !/^\d{5,13}$/.test(fid)) { $("wd-status").textContent = "Укажи Telegram ID друга (только цифры)"; return; }
+    if (!confirm(`Вывести ${g.emoji} ${g.name} за ${price}⭐ ${mode === "self" ? "СЕБЕ" : "другу " + fid}?\nЗвёзды будут списаны по-настоящему.`)) return;
     try {
-        const r = await fetch(`/api/admin/withdraw?account=${acc}&gift=${encodeURIComponent(code)}`,
+        const r = await fetch(`/api/admin/withdraw?account=${acc}&gift=${encodeURIComponent(code)}&mode=${mode}&friend_id=${encodeURIComponent(mode === "friend" ? fid : "")}`,
             { method: "POST", credentials: "same-origin" });
         if (!r.ok) {
             let m = "HTTP " + r.status;
