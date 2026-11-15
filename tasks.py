@@ -321,7 +321,7 @@ class TaskRunner:
                 self._running = False
                 self.core.tasks_cycle_done.set()
 
-            sleep_for = sleep_for or random_task_interval()
+            sleep_for = (sleep_for or random_task_interval()) * self.sched.slowdown()   # прогрев: реже
             await self.sched.set_next("tasks", sleep_for)
             woke = await self._sleep_or_wake(sleep_for)
             if woke:
