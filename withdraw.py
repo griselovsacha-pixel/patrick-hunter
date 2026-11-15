@@ -38,19 +38,19 @@ ENABLED = os.getenv("WITHDRAW_ENABLED", "1") != "0"
 # Каталог подарков экрана «Подарить другу». Порядок и эмодзи — по экрану бота
 # (в тексте кнопок эмодзи — custom emoji, в тексте не видны; соответствие подтверждено
 # запросом бота «🧸 за 15.0 ⭐️» для send-gift_15_1, остальное — по раскладке экрана).
-GIFTS = [
-    {"code": "15_1", "emoji": "🧸", "name": "Мишка", "stars": 15},
-    {"code": "15_2", "emoji": "💝", "name": "Сердце", "stars": 15},
-    {"code": "25_1", "emoji": "🌹", "name": "Роза", "stars": 25},
-    {"code": "25_2", "emoji": "🎁", "name": "Подарок", "stars": 25},
-    {"code": "50_1", "emoji": "🍾", "name": "Шампанское", "stars": 50},
-    {"code": "50_2", "emoji": "💐", "name": "Букет", "stars": 50},
-    {"code": "50_3", "emoji": "🚀", "name": "Ракета", "stars": 50},
-    {"code": "50_4", "emoji": "🎂", "name": "Торт", "stars": 50},
-    {"code": "100_1", "emoji": "🏆", "name": "Кубок", "stars": 100},
-    {"code": "100_2", "emoji": "💍", "name": "Кольцо", "stars": 100},
-    {"code": "100_3", "emoji": "💎", "name": "Алмаз", "stars": 100},
-    {"code": "premium", "emoji": "👑", "name": "Telegram Premium 6 мес.", "stars": 1700},
+# stars — цена при подарке ДРУГУ (экран send-gift_*), self_stars/self_data — вывод СЕБЕ (экран gift_*).
+# Premium 3 мес. есть только в режиме «себе»; Premium 6 мес.: 1200⭐ себе / 1700⭐ другу (цены с экранов бота).
+_STD = [("15_1", "🧸", "Мишка", 15), ("15_2", "💝", "Сердце", 15), ("25_1", "🌹", "Роза", 25),
+        ("25_2", "🎁", "Подарок", 25), ("50_1", "🍾", "Шампанское", 50), ("50_2", "💐", "Букет", 50),
+        ("50_3", "🚀", "Ракета", 50), ("50_4", "🎂", "Торт", 50), ("100_1", "🏆", "Кубок", 100),
+        ("100_2", "💍", "Кольцо", 100), ("100_3", "💎", "Алмаз", 100)]
+GIFTS = [{"code": c, "emoji": e, "name": n, "stars": p, "self_stars": p, "self_data": f"gift_{c}"}
+         for c, e, n, p in _STD]
+GIFTS += [
+    {"code": "premium_3m", "emoji": "👑", "name": "Telegram Premium 3 мес.", "stars": None,
+     "self_stars": 900, "self_data": "gift_premium_3months"},
+    {"code": "premium", "emoji": "👑", "name": "Telegram Premium 6 мес.", "stars": 1700,
+     "self_stars": 1200, "self_data": "gift_premium"},
 ]
 GIFT_BY_CODE = {g["code"]: g for g in GIFTS}
 
@@ -80,12 +80,22 @@ class WithdrawManager:
     def is_running(self) -> bool:
         return self.current is not None
 
-    async def start(self, acc, code: str) -> dict:
+    async def start(self, acc, code: str, mode: str = "friend", friend_id=None) -> dict:
         if not ENABLED:
             raise RuntimeError("Автовывод выключен (WITHDRAW_ENABLED=0)")
         gift = GIFT_BY_CODE.get(code)
         if not gift:
             raise ValueError("Неизвестный подарок")
+        if mode not in ("self", "friend"):
+            raise ValueError("Режим: self или friend")
+        price = gift["self_stars"] if mode == "self" else gift["stars"]
+        if not price:
+            raise ValueError("Этот подарок недоступен в выбранном режиме")
+        target = None
+        if mode == "friend":
+            target = str(friend_id or FRIEND_ID).strip()
+            if not target.isdigit() or not (5 <= len(target) <= 13):
+                raise ValueError("ID друга — только цифры (Telegram ID)")
         if self.current is not None:
             raise RuntimeError("Уже идёт другой вывод")
         ps = acc.profile_stats
@@ -95,7 +105,7 @@ class WithdrawManager:
         job = {
             "account": int("".join(ch for ch in acc.label if ch.isdigit()) or "1"),
             "label": acc.label, "gift_code": code, "gift_emoji": gift["emoji"],
-            "gift_name": gift["name"], "stars": gift["stars"], "friend_id": FRIEND_ID,
+            "gift_name": gift["name"], "stars": price, "friend_id": target, "mode": mode,
             "status": "running", "error": None, "steps": [], "bot_response": None,
             "balance_before": None, "balance_after": None,
             "created_at": _now().isoformat(), "finished_at": None, "id": None,
@@ -143,6 +153,10 @@ def _fail(job, error, step_name=None):
     _step(job, step_name or "ошибка", False, error)
 
 
+def _target_text(job) -> str:
+    return "себе" if job.get("mode") == "self" else f"другу {job.get('friend_id')}"
+
+
 async def _announce(acc, job):
     icon = {"success": "✅", "unverified": "❔", "failed": "❌"}.get(job["status"], "•")
     bal = ""
@@ -150,11 +164,11 @@ async def _announce(acc, job):
         bal = f"\n💰 Баланс: {job['balance_before']} → {job['balance_after'] if job['balance_after'] is not None else '?'}"
     err = f"\n⚠️ {job['error']}" if job.get("error") else ""
     await acc.tg_logger.log(
-        f"{icon} Вывод {job['gift_emoji']} {job['gift_name']} {job['stars']}⭐ другу {job['friend_id']}: "
+        f"{icon} Вывод {job['gift_emoji']} {job['gift_name']} {job['stars']}⭐ {_target_text(job)}: "
         f"{job['status']}{bal}{err}")
     if getattr(acc, "knowledge", None):
         acc.knowledge.on_flow(
-            f"Вывод {job['gift_emoji']} {job['stars']}⭐ другу → {job['status']}",
+            f"Вывод {job['gift_emoji']} {job['stars']}⭐ {_target_text(job)} → {job['status']}",
             job["steps"], job["status"], {"gift": job["gift_code"], "error": job.get("error")})
 
 
@@ -164,7 +178,9 @@ async def _announce(acc, job):
 async def _flow(acc, job, save):
     core = acc.core
     gift = GIFT_BY_CODE[job["gift_code"]]
-    friend = str(job["friend_id"])
+    mode = job.get("mode", "friend")
+    price = job["stars"]
+    friend = str(job["friend_id"] or "")
 
     async def click(btn):
         return await core.click_button(btn)
@@ -190,8 +206,11 @@ async def _flow(acc, job, save):
             job["balance_before"] = float(acc.profile_stats.balance)   # с экрана баланс не прочитался — берём из последнего профиля
         _step(job, "экран вывода", True, f"баланс {job['balance_before']}")
         await save()
-        if job["balance_before"] is not None and job["balance_before"] < gift["stars"]:
-            return _fail(job, f"недостаточно звёзд: баланс {job['balance_before']} < {gift['stars']}")
+        if job["balance_before"] is not None and job["balance_before"] < price:
+            return _fail(job, f"недостаточно звёзд: баланс {job['balance_before']} < {price}")
+
+        if mode == "self":
+            return await _flow_self(acc, job, save, w, gift, price)
 
         # 2. «Подарить другу»
         await human_delay(2, 4)
@@ -270,12 +289,79 @@ async def _flow(acc, job, save):
             _step(job, "проверка баланса", False, str(e)[:100])
         b0, b1 = job["balance_before"], job["balance_after"]
         if b0 is not None and b1 is not None:
-            if b0 - b1 >= gift["stars"] - 0.5:
+            if b0 - b1 >= price - 0.5:
                 _step(job, "баланс уменьшился", True, f"{b0} → {b1}")
             else:
                 job["status"] = "unverified"
-                job["error"] = f"баланс не уменьшился на {gift['stars']}: {b0} → {b1}"
+                job["error"] = f"баланс не уменьшился на {price}: {b0} → {b1}"
                 _step(job, "баланс не уменьшился", False, job["error"])
+
+
+async def _flow_self(acc, job, save, w, gift, price):
+    """Вывод СЕБЕ: на экране вывода жмём подарок gift_*. Что бот покажет дальше, точно неизвестно
+    (в «Обучении» этого шага ещё нет) — поэтому: если придёт экран с кнопкой «Подтвердить» —
+    нажимаем её; итог всегда проверяем по падению баланса. Весь ответ бота пишется в историю."""
+    core = acc.core
+    gbtn = find_button_by_data(w, exact=(gift["self_data"],))
+    if not gbtn:
+        return _fail(job, f"на экране вывода нет подарка {gift['self_data']}")
+    await human_delay(2, 4)
+    since = utcnow()
+    alert, _a = await core.click_button(gbtn)
+    res = None if alert else await core.wait_fresh(since, timeout=15)
+    text = alert or ((res.text or "") if res else "")
+    job["bot_response"] = " ".join(text.split())[:300]
+    _step(job, "выбрал подарок", True, job["bot_response"][:120])
+    if alert and any(x in alert.lower() for x in ("❌", "не ", "недостат", "минимум", "подпиш")):
+        return _fail(job, f"бот отказал: {alert}", "выбор подарка")
+
+    # возможный экран подтверждения
+    if res is not None:
+        cbtn = None
+        for row in (getattr(res, "buttons", None) or []):
+            for b in row:
+                if getattr(b, "data", None) and "подтверд" in (b.text or "").lower():
+                    cbtn = b
+        if cbtn is not None:
+            await human_delay(3, 6)
+            since = utcnow()
+            alert2, _b = await core.click_button(cbtn)
+            res2 = None if alert2 else await core.wait_fresh(since, timeout=15)
+            job["bot_response"] = " ".join((alert2 or ((res2.text or "") if res2 else "") or "").split())[:300]
+            _step(job, "нажал «Подтвердить»", True, job["bot_response"][:120])
+        elif "❌" in (res.text or ""):
+            return _fail(job, f"бот отказал: {job['bot_response']}", "выбор подарка")
+
+    job["status"] = "success"
+    await save()
+    await _verify_balance(acc, job, price)
+
+
+async def _verify_balance(acc, job, price):
+    core = acc.core
+    await human_delay(3, 6)
+    try:
+        msg = await core._open_unlocked()
+        pbtn = find_button_by_data(msg, exact=("profile:show",)) if msg else None
+        if pbtn:
+            since = utcnow()
+            await core.click_button(pbtn)
+            prof = await core.wait_fresh(since, timeout=12)
+            if prof:
+                await acc.profile_stats.update_from_profile_text(prof.text or "")
+                job["balance_after"] = _balance(prof.text)
+                if job["balance_after"] is None:
+                    job["balance_after"] = float(acc.profile_stats.balance)
+    except Exception as e:
+        _step(job, "проверка баланса", False, str(e)[:100])
+    b0, b1 = job["balance_before"], job["balance_after"]
+    if b0 is not None and b1 is not None:
+        if b0 - b1 >= price - 0.5:
+            _step(job, "баланс уменьшился", True, f"{b0} → {b1}")
+        else:
+            job["status"] = "unverified"
+            job["error"] = f"баланс не уменьшился на {price}: {b0} → {b1}"
+            _step(job, "баланс не уменьшился", False, job["error"])
 
 
 def core_target():
