@@ -1,4 +1,3 @@
-
 """
 Схема БД проекта в одном месте.
 
@@ -97,6 +96,7 @@ TABLES = {
         ("gift_name", "text"),
         ("stars", "numeric(12,2) not null default 0"),
         ("friend_id", "text"),
+        ("mode", "text"),
         ("status", "text not null default 'running'"),
         ("error", "text"),
         ("balance_before", "numeric(12,2)"),
