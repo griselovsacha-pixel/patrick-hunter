@@ -344,7 +344,7 @@ class SupabaseStore:
     # ---------- автовывод (withdraw.py) ----------
     @staticmethod
     def _withdraw_payload(job):
-        keys = ("gift_code", "gift_emoji", "gift_name", "stars", "friend_id", "status", "error",
+        keys = ("gift_code", "gift_emoji", "gift_name", "stars", "friend_id", "mode", "status", "error",
                 "balance_before", "balance_after", "steps", "bot_response", "finished_at")
         return {k: job.get(k) for k in keys}
 
