@@ -66,6 +66,7 @@ class Clicker:
 
     def _make_plan(self, now):
         times_today = random.randint(CLICKER_MIN_PER_DAY, CLICKER_MAX_PER_DAY)
+        times_today = max(3, round(times_today * self.sched.warmup_factor()))   # прогрев: меньше кликов
         window_sec = (CLICKER_END_HOUR - CLICKER_START_HOUR) * 3600
         part_sec = window_sec // times_today
         day_start = now.replace(hour=CLICKER_START_HOUR, minute=0, second=0, microsecond=0)
