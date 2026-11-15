@@ -869,3 +869,7 @@ tbody tr:hover {
 .account-status .badge {
     margin-left: 8px;
 }
+.wd-mode{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:10px 0}
+.wd-fid{flex:0 1 220px;min-width:140px}
+.wd-warm{font-size:13px;padding:6px 10px;margin:6px 0 10px;border-radius:8px;background:rgba(255,173,77,.14)}
+.wd-warm.done{background:rgba(53,208,127,.14)}
