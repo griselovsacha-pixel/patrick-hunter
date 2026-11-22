@@ -12,6 +12,7 @@ import logging
 
 from utils import human_delay, parse_next_daily_seconds, looks_like_bio_link_popup, solve_math
 from core import utcnow
+from knowledge import is_ad
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ class DailyClaimer:
         """Возвращает количество секунд до следующей попытки."""
         try:
             await self.tg_logger.log("📅 Начинаю сбор ежедневки...")
+            ad_seen = False   # бот ответил рекламой вместо всплывающего окна (см. ниже)
 
             for attempt in range(3):
                 if attempt > 0:
@@ -92,7 +94,7 @@ class DailyClaimer:
                     alert_text, _ = await self.core.click_button(daily_btn)
 
                     if alert_text:
-                        return await self._handle_alert(alert_text)
+                        return await self._handle_alert(alert_text, claimed_hint=ad_seen)
 
                     # Алерта не было (редкий случай, обычно сразу после
                     # рестарта — Telegram не всегда возвращает алерт на
@@ -111,6 +113,17 @@ class DailyClaimer:
                         continue
 
                     text = msg.text or ""
+
+                    # По «Обучению» бот ВСЕГДА отвечает на «Ежедневку» рекламой (NFT/магазин/PvP/ГДЗ…) вместо
+                    # всплывающего окна, но бонус при этом засчитывается: повторное нажатие через минуты
+                    # даёт «Бонус можно получить раз в 24 часа! Осталось: 23 ч 5x мин». Раньше реклама
+                    # разбиралась как «непонятный ответ» (а текст «…тебе уже доступны…» — даже как «уже
+                    # забрана»), и сбор не попадал в статистику. Теперь: помечаем и перепроверяем нажатием.
+                    if is_ad(msg) or ("новые задания" in text.lower() and "доступны" in text.lower()):
+                        ad_seen = True
+                        first = (text.strip().splitlines() or [""])[0][:50]
+                        await self.tg_logger.log(f"📅 Вместо ответа бот показал рекламу «{first}» — проверю повторным нажатием")
+                        continue
 
                     if looks_like_bio_link_popup(text):
                         await self.tg_logger.log(
@@ -171,7 +184,18 @@ class DailyClaimer:
             await self.tg_logger.log("Ошибка ежедневки", error=str(e))
             return 3600
 
-    async def _handle_alert(self, alert_text: str) -> int:
+    async def _record_claim(self, note: str):
+        self.profile_stats.daily_collected_today = True
+        now = utcnow()
+        last = getattr(self, "_last_recorded", None)
+        if last and (now - last).total_seconds() < 20 * 3600:
+            return   # защита от двойной записи за одни сутки
+        self._last_recorded = now
+        if self.db:
+            await self.db.event("daily_bonus", stars=1.0)
+        await self.tg_logger.log(f"📅 Ежедневка собрана (+1⭐): {note}")
+
+    async def _handle_alert(self, alert_text: str, claimed_hint: bool = False) -> int:
         """Реальный ответ бота на кнопку ежедневки, полученный как
         всплывающее окно (см. click_button). Бывает ДВУХ типов, и это
         разные ситуации:
@@ -196,8 +220,19 @@ class DailyClaimer:
             await self.tg_logger.log(f"⏳ Ссылку в био {status} через {wait_sec // 60}м")
             return wait_sec
 
+        low = alert_text.lower()
+        wait_sec = parse_next_daily_seconds(alert_text)
+        if claimed_hint and wait_sec >= 22 * 3600:
+            # до следующего бонуса почти полные сутки + перед этим была реклама вместо ответа =
+            # бонус только что засчитан
+            await self._record_claim("бот показал рекламу, повторное нажатие подтвердило кулдаун")
+            return wait_sec
+        if "получил" in low and "осталось" not in low and "раз в" not in low:
+            # настоящий успешный ответ (если бот когда-нибудь вернёт его всплывающим окном)
+            await self._record_claim(alert_text[:100])
+            return 24 * 3600
         await self.tg_logger.log(f"⏳ Ежедневка на кулдауне (реальный алерт бота):\n{alert_text}")
-        return parse_next_daily_seconds(alert_text)
+        return wait_sec
 
     async def _finish_collect(self, resp) -> int:
         resp_text = (resp.text or "") if resp else ""
