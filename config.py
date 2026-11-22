@@ -16,21 +16,16 @@ CHANNEL_SOURCE = 'patrickstarsfarm'
 # сообщения о достижении звёздных вех и об ошибках.
 LOG_GROUP_INVITE = 'https://t.me/+8s4mIhpGhO80MGIy'
 
-# Наша реферальная ссылка — вставляется в описание профиля, когда бот просит
-# это сделать для ежедневного бонуса.
-REFERRAL_LINK = 'https://t.me/patrickstarsrobot?start=880628963'  # запасной вариант для аккаунтов без своей ссылки
-# Личная реф. ссылка КАЖДОГО аккаунта (ставится в описание профиля). Можно переопределить
-# переменной окружения REFERRAL_LINK_<номер>, например REFERRAL_LINK_3.
-REFERRAL_LINKS = {
-    1: 'https://t.me/patrickstarsrobot?start=7880707793',
-    2: 'https://t.me/patrickstarsrobot?start=880628963',
-}
+# Личная реф. ссылка аккаунта ставится в описание профиля (ежедневный бонус). По умолчанию она
+# строится САМА из Telegram ID аккаунта: https://t.me/patrickstarsrobot?start=<ID> (см. bio_manager.py).
+# Переопределить для конкретного слота можно переменной REFERRAL_LINK_<номер> (например REFERRAL_LINK_2).
+# Раньше ссылки были зашиты здесь по номеру слота — при замене аккаунта они указывали на старый.
+REFERRAL_LINK = (os.getenv("REFERRAL_LINK") or "").strip()   # запасной вариант, если ID ещё неизвестен
 
 
 def referral_link_for(account_number: int) -> str:
-    return (os.getenv(f"REFERRAL_LINK_{account_number}")
-            or REFERRAL_LINKS.get(account_number)
-            or REFERRAL_LINK)
+    return (os.getenv(f"REFERRAL_LINK_{account_number}") or REFERRAL_LINK or "").strip()
+
 
 TIMEZONE_OFFSET = 3  # UTC+3
 
