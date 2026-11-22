@@ -217,9 +217,15 @@ function proxyBadge(p) {
 }
 
 function proxyAddress(p) {
-    if (!p || !p.configured) return `<span class="proxy-sub">прямое соединение</span>`;
-    const ip = p.exit_ip ? `<div class="proxy-sub">IP выхода: ${escapeHtml(p.exit_ip)}</div>` : "";
-    return `<div>${escapeHtml(p.display || "—")}${p.auth ? " 🔑" : ""}</div>${ip}`;
+    if (!p || !p.configured) {
+        const ip = p && p.direct_ip ? ` · ${escapeHtml(p.direct_ip)}` : "";
+        return `<span class="proxy-sub">прямое соединение (IP Render${ip})</span>`;
+    }
+    const via = p.route === "direct"
+        ? `<div class="proxy-sub">⚠️ сейчас напрямую, IP Render${p.direct_ip ? ": " + escapeHtml(p.direct_ip) : ""}${p.failed_over ? " (авария прокси)" : ""}</div>`
+        : "";
+    const ip = p.exit_ip && p.route !== "direct" ? `<div class="proxy-sub">IP выхода: ${escapeHtml(p.exit_ip)}</div>` : "";
+    return `<div>${escapeHtml(p.display || "—")}${p.auth ? " 🔑" : ""}</div>${via}${ip}`;
 }
 
 function proxyDetails(p) {
@@ -1045,27 +1051,145 @@ async function loadControl() {
                         ${(!a.ready || s.running || !s.manual) ? "disabled" : ""}>${btn}</button>
                 </div>`;
             }).join("");
-            const w = a.warmup;
-            const warm = w && w.enabled
-                ? (w.active
-                    ? `<div class="wd-warm">🌱 Прогрев: день ${w.day} из ${w.days} · нагрузка ${Math.round(w.factor * 100)}% от обычной (клики и задания реже, первый запуск позже)</div>`
-                    : `<div class="wd-warm done">✅ Прогрев завершён (${w.days} дн.)</div>`)
-                : "";
-            return `<div class="ctl-acc"><h3>${escapeHtml(a.label)} ${a.ready ? "" : "<i>(запускается…)</i>"}</h3>${warm}
-                <div class="ctl-jobs">${jobs}</div>
+            const dead = a.dead
+                ? `<div class="wd-warm dead">❌ Аккаунт остановлен: ${escapeHtml(a.dead)}. Нужна новая сессия (вкладка «Генерация сессии») — после замены TELEGRAM_SESSION_${a.account} на Render аккаунт запустится заново.</div>` : "";
+            return `<div class="ctl-acc"><h3>${escapeHtml(a.label)} ${a.ready ? "" : (a.dead ? "" : "<i>(запускается…)</i>")}</h3>${dead}
+                <div class="ctl-jobs">${routePanel(a)}${warmupPanel(a)}</div>
+                <div class="ctl-jobs" style="margin-top:10px">${jobs}</div>
                 <button class="kn-btn" data-probe="${a.account}" ${a.ready ? "" : "disabled"}
                     title="Нажимает минимальную сумму вывода только если бот гарантированно откажет">Проба вывода (безопасно)</button></div>`;
         }).join("");
         document.querySelectorAll("#ctl-list button[data-job]").forEach(b => b.onclick = () => runJob(b));
         document.querySelectorAll("#ctl-list button[data-probe]").forEach(b => b.onclick = () => probeWithdraw(b));
+        bindControlPanels();
     } catch (e) {
         $("ctl-status").textContent = "Не удалось загрузить: " + e.message;
     }
     if (!ctlTimer) {
         ctlTimer = setInterval(() => {
-            if (document.getElementById("section-control").classList.contains("active")) loadControl();
+            const ae = document.activeElement;
+            const typing = ae && ae.tagName === "INPUT" && ae.closest && ae.closest("#ctl-list");
+            if (!typing && document.getElementById("section-control").classList.contains("active")) loadControl();
         }, 15000);
     }
+}
+
+async function postJson(url, body) {
+    const r = await fetch(url, {
+        method: "POST", credentials: "same-origin",
+        headers: body ? { "Content-Type": "application/json" } : {},
+        body: body ? JSON.stringify(body) : undefined,
+    });
+    let data = {};
+    try { data = await r.json(); } catch (_) {}
+    if (!r.ok) throw new Error(data.detail || ("HTTP " + r.status));
+    return data;
+}
+
+const MODE_TITLES = { auto: "Авто", on: "Только прокси", off: "Напрямую (Render)" };
+const MODE_HINTS = {
+    auto: "Идёт через прокси; если прокси не работает — сам переходит на IP Render и возвращается, когда прокси стабильно здоров 10 минут.",
+    on: "Только через прокси. Если прокси упадёт — аккаунт останется без связи (аварийного перехода нет).",
+    off: "Прокси выключен: аккаунт работает с IP Render, что бы ни случилось с прокси.",
+};
+
+function routePanel(a) {
+    const p = a.proxy || {};
+    const mode = p.mode || "auto";
+    const hasProxy = p.configured;
+    const routeTxt = p.route === "proxy"
+        ? `🟢 через прокси${p.display ? " " + escapeHtml(p.display) : ""}${p.exit_ip ? " · IP " + escapeHtml(p.exit_ip) : ""}`
+        : p.route === "direct"
+            ? `🟠 напрямую — IP Render${p.direct_ip ? " " + escapeHtml(p.direct_ip) : ""}`
+            : "—";
+    const src = p.url_source === "admin" ? "задан в админке" : p.url_source === "env" ? "из переменной ACCOUNT_N_PROXY" : "";
+    const st = hasProxy
+        ? `Прокси: ${proxyBadge(p)} ${proxyDetails(p)}${src ? `<div class="proxy-sub">${src}</div>` : ""}`
+        : `<div class="proxy-sub">Прокси не задан — аккаунт всегда с IP Render. Задайте адрес ниже, чтобы включить.</div>`;
+    const fo = p.failed_over
+        ? `<div class="wd-warm">⚠️ Авария прокси: аккаунт временно на IP Render. Вернётся на прокси сам, когда тот проработает стабильно ${Math.round((p.failback_sec || 600) / 60)} мин.</div>` : "";
+    const ev = (p.events || []).slice().reverse().slice(0, 3)
+        .map(e => `<div class="proxy-sub">${escapeHtml(formatDate(e.at))} — ${escapeHtml(e.text)}</div>`).join("");
+    const btns = ["auto", "on", "off"].map(m =>
+        `<button class="kn-btn ${m === mode ? "kn-primary" : ""}" data-pmode="${m}" data-acc="${a.account}"
+            title="${escapeHtml(MODE_HINTS[m])}" ${(a.dead || (m !== "off" && !hasProxy)) ? "disabled" : ""}>${MODE_TITLES[m]}</button>`).join("");
+    return `<div class="ctl-job route-box">
+        <div class="ctl-job-head"><b>🌐 Маршрут в Telegram</b><span>${routeTxt}</span></div>
+        <div class="ctl-line">Режим: <b>${MODE_TITLES[mode]}</b> — ${escapeHtml(MODE_HINTS[mode])}</div>
+        ${st}${fo}${ev}
+        <div class="wd-mode">${btns}
+            <button class="kn-btn" data-pcheck="${a.account}">Проверить сейчас</button></div>
+        <div class="wd-mode">
+            <input class="wd-fid" type="text" id="purl-${a.account}" placeholder="socks5://user:pass@host:port" autocomplete="off">
+            <button class="kn-btn" data-purl="${a.account}" ${a.dead ? "disabled" : ""}>Сохранить прокси</button>
+            ${p.url_source === "admin" ? `<button class="kn-btn" data-purl-clear="${a.account}">Убрать (вернуть из env)</button>` : ""}
+        </div></div>`;
+}
+
+function warmupPanel(a) {
+    const w = a.warmup || {};
+    let head;
+    if (w.enabled && w.active) {
+        const till = w.ends_at ? ` · до ${escapeHtml(formatDate(w.ends_at))}` : "";
+        head = `<div class="wd-warm">🌱 Прогрев: день ${w.day} из ${w.days} · нагрузка ${Math.round(w.factor * 100)}% от обычной${till}</div>`;
+    } else if (w.enabled) {
+        head = `<div class="wd-warm done">✅ Прогрев завершён (${w.days} дн.) — работает на полной нагрузке</div>`;
+    } else {
+        head = `<div class="ctl-line">Прогрев выключен — аккаунт работает на полной нагрузке.</div>`;
+    }
+    return `<div class="ctl-job">
+        <div class="ctl-job-head"><b>🌱 Прогрев</b></div>${head}
+        <div class="ctl-line">Нагрузка растёт с 20% до 100% за N дней: клики и задания реже, меньше заданий за цикл.
+            Промокоды и чеки ловятся как обычно. Применяется сразу, без перезапуска.</div>
+        <div class="wd-mode">
+            <input class="wd-fid" type="number" min="1" max="60" value="${w.enabled && w.days ? w.days : 5}" id="wdays-${a.account}">
+            <button class="kn-btn kn-primary" data-wstart="${a.account}">${w.enabled && w.active ? "Начать заново" : "Запустить прогрев"}</button>
+            ${w.enabled ? `<button class="kn-btn" data-wstop="${a.account}">Выключить</button>` : ""}
+        </div></div>`;
+}
+
+async function ctlAction(fn, okText) {
+    $("ctl-status").textContent = "Применяю…";
+    try {
+        const data = await fn();
+        $("ctl-status").textContent = (okText || "Готово")
+            + (data && data.saved === false ? " (БД недоступна — настройка действует до перезапуска)" : "");
+    } catch (e) {
+        $("ctl-status").textContent = "Не вышло: " + e.message;
+    }
+    loadControl();
+}
+
+function bindControlPanels() {
+    document.querySelectorAll("#ctl-list [data-pmode]").forEach(b => b.onclick = () => {
+        b.disabled = true;
+        ctlAction(() => postJson(`/api/admin/proxy/mode?account=${b.dataset.acc}&mode=${b.dataset.pmode}`),
+            "Режим: " + MODE_TITLES[b.dataset.pmode]);
+    });
+    document.querySelectorAll("#ctl-list [data-pcheck]").forEach(b => b.onclick = () => {
+        b.disabled = true;
+        ctlAction(() => postJson(`/api/admin/proxies/check?account=${b.dataset.pcheck}`), "Проверка выполнена");
+    });
+    document.querySelectorAll("#ctl-list [data-purl]").forEach(b => b.onclick = () => {
+        const url = ($(`purl-${b.dataset.purl}`).value || "").trim();
+        if (!url) { $("ctl-status").textContent = "Введите адрес прокси"; return; }
+        b.disabled = true;
+        ctlAction(() => postJson("/api/admin/proxy/url", { account: Number(b.dataset.purl), url }), "Прокси сохранён и применён");
+    });
+    document.querySelectorAll("#ctl-list [data-purl-clear]").forEach(b => b.onclick = () => {
+        b.disabled = true;
+        ctlAction(() => postJson("/api/admin/proxy/url", { account: Number(b.dataset.purlClear), url: "" }), "Адрес из админки убран");
+    });
+    document.querySelectorAll("#ctl-list [data-wstart]").forEach(b => b.onclick = () => {
+        const days = Number($(`wdays-${b.dataset.wstart}`).value);
+        if (!(days >= 1 && days <= 60)) { $("ctl-status").textContent = "Дней прогрева: от 1 до 60"; return; }
+        b.disabled = true;
+        ctlAction(() => postJson("/api/admin/warmup", { account: Number(b.dataset.wstart), days }), `Прогрев запущен на ${days} дн.`);
+    });
+    document.querySelectorAll("#ctl-list [data-wstop]").forEach(b => b.onclick = () => {
+        b.disabled = true;
+        ctlAction(() => postJson("/api/admin/warmup", { account: Number(b.dataset.wstop), days: 0 }), "Прогрев выключен");
+    });
 }
 
 async function probeWithdraw(btn) {
