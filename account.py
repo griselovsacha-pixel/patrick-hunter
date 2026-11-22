@@ -8,10 +8,12 @@ Supabase. Общего состояния между аккаунтами нет
 """
 import asyncio
 import random
+import time
 import datetime
 import logging
 
 from telethon import TelegramClient
+from telethon import errors as tg_errors
 from telethon.sessions import StringSession
 
 from config import (
@@ -34,7 +36,8 @@ from daily import DailyClaimer
 from tasks import TaskRunner
 from promo import PromoHunter
 from checks import CheckHunter
-from proxy_check import ProxyMonitor
+from proxy_manager import ProxyManager
+from lease import SessionLease
 from watcher import ChannelWatcher
 from clicker import Clicker
 from supabase_db import SupabaseStore
@@ -47,24 +50,40 @@ from telethon import events
 logger = logging.getLogger(__name__)
 
 
+class SessionDeadError(Exception):
+    """Сессия аккаунта недействительна (разлогинена/отозвана) — повторять старт бессмысленно."""
+
+
+# Ошибки, при которых аккаунт уже не оживить без новой сессии: бан, отзыв, разлогин, а также
+# «ключ использован из двух мест» (AuthKeyDuplicatedError — двойной запуск одной сессии).
+FATAL_AUTH_ERRORS = tuple(
+    getattr(tg_errors, name)
+    for name in (
+        "AuthKeyError", "AuthKeyUnregisteredError", "AuthKeyDuplicatedError", "SessionRevokedError",
+        "SessionExpiredError", "UserDeactivatedError", "UserDeactivatedBanError",
+    )
+    if hasattr(tg_errors, name)
+) + (SessionDeadError,)
+
+
 class PatrickAccount:
     def __init__(self, label: str, session_string: str, index: int = 0):
         self.label = label
         self.index = index
         self.ready = False  # True, когда клиент поднят и ловля промо/чеков запущена
+        self.dead = None    # причина, если сессия мертва (бан/отзыв/двойной запуск) — аккаунт остановлен
+        self.me = None
         self.db = SupabaseStore(label)
 
-        from proxy_conf import proxy_for
         digits = "".join(ch for ch in label if ch.isdigit())
         self.number = int(digits or "1")
+        # Прокси НЕ задаём здесь: маршрут (прокси / IP Render) выбирает ProxyManager перед
+        # первым подключением — по настройкам из админки (см. start()).
         self.client = TelegramClient(
             StringSession(session_string),
             API_ID,
             API_HASH,
-            proxy=proxy_for(self.number),
         )
-        # Статус прокси для админки (проверка раз в 5 мин + ручная кнопка)
-        self.proxy = ProxyMonitor(self.number, self.client, label)
 
         self.bot_lock = PriorityLock()
         self.tg_logger = TgLogger(self.client, label, self.db)
@@ -117,17 +136,47 @@ class PatrickAccount:
         # Кликер просит внеочередной цикл заданий, когда бот пишет «выполни задание»
         self.clicker.on_gate = self.tasks.request_run
 
+        # Маршрут в Telegram (прокси / IP Render): режим и адрес меняются из админки, при аварии
+        # прокси — автоматический переход на IP Render (proxy_manager.py)
+        self.proxy = ProxyManager(self.number, self.client, label, self.sched, self.tg_logger,
+                                  is_live=lambda: self.ready)
+        # Защита от двойного запуска сессии (деплой Render: старый и новый инстанс одновременно)
+        self.lease = SessionLease(self.db, label, on_lost=self.fatal)
+
         self._background_tasks = []
         self._bot_dm_handler = None
         self._warmup_task = None
 
     # ------------------------------------------------------------------
     async def start(self):
-        await self.client.start()
+        # 1) БД и настройки аккаунта — ДО подключения: от них зависят режим прокси и прогрев
+        await self.db.start()
+        await self.sched.load()
+
+        # 2) не подключаемся, пока ту же сессию держит другой инстанс (старый деплой)
+        await self.lease.acquire()
+
+        # 3) маршрут: прокси или IP Render (мёртвый прокси на старте не должен блокировать аккаунт)
+        route = await self.proxy.initial_route()
+        logger.info("[%s] маршрут при старте: %s (режим: %s)", self.label,
+                    "прокси" if route == "proxy" else "IP Render", self.proxy.mode)
+
+        # 4) подключение. Вместо client.start() (он при мёртвой сессии просит ввести телефон через
+        # input() и вешает/роняет старт) — connect + явная проверка авторизации.
+        await self.client.connect()
+        if not await self.client.is_user_authorized():
+            raise SessionDeadError("сессия не авторизована")
+        try:
+            self.me = await self.client.get_me()
+        except FATAL_AUTH_ERRORS:
+            raise
+        except Exception as e:
+            logger.warning("[%s] get_me: %s", self.label, e)
+        if self.me is not None:
+            # личная реф. ссылка = t.me/<бот>?start=<ID аккаунта> (раньше была зашита в config)
+            self.bio_manager.user_id = self.me.id
 
         self._register_bot_dm_handler()
-
-        await self.db.start()
         await self.db.set_connected(True)
 
         await self.tg_logger.setup()
@@ -150,9 +199,12 @@ class PatrickAccount:
         # ежедневка/задания, а здесь — один отложенный запрос с разбросом.
         self._background_tasks_delayed = asyncio.create_task(self._delayed_balance())
 
+        wi = self.sched.warmup_info()
         await self.tg_logger.log(
             "🤖 Бот запущен!\n"
-            "📅 Ежедневка: по времени бота\n"
+            f"🌐 Маршрут: {'прокси' if self.proxy.route == 'proxy' else 'IP Render'} (режим: {self.proxy.mode})\n"
+            + (f"🌱 Прогрев: день {wi['day']} из {wi['days']}, нагрузка {round(wi['factor'] * 100)}%\n" if wi["active"] else "")
+            + "📅 Ежедневка: по времени бота\n"
             f"📋 Задания: каждые ~{TASK_INTERVAL_MIN_SEC // 60}-{TASK_INTERVAL_MAX_SEC // 60} мин и по запросу кликера\n"
             "🔔 Промокоды и чеки: события + опрос канала каждые несколько секунд\n"
             "🎮 Кликер: рандом раз в день, окно 8:00-00:00 (план дня хранится в БД)\n"
@@ -173,37 +225,80 @@ class PatrickAccount:
             self._background_tasks.append(
                 asyncio.create_task(self._supervised("crawler", self.crawler.run_forever)))
 
+    async def fatal(self, reason: str):
+        """Аккаунт больше работать не может (бан, отозванная сессия, двойной запуск): останавливаем
+        всю его активность и помечаем в админке, вместо бесконечных повторов с ошибками."""
+        if self.dead:
+            return
+        self.dead = reason
+        self.ready = False
+        logger.error("❌ [%s] аккаунт остановлен: %s", self.label, reason)
+        try:
+            await self.tg_logger.log(f"❌ Аккаунт остановлен: {reason}", error="нужна новая сессия или проверка аккаунта")
+        except Exception:
+            pass
+        asyncio.get_running_loop().create_task(self.stop())
+
     async def _supervised(self, name: str, factory):
         """Фоновая задача перезапускается, если упала: раньше одно
         необработанное исключение молча убивало, например, кликер до
-        следующего деплоя."""
+        следующего деплоя. Пауза между перезапусками растёт, но сбрасывается, если задача
+        до падения проработала >10 минут (раньше она только росла до 10 минут навсегда)."""
         backoff = 15
         while True:
+            began = time.monotonic()
             try:
                 await factory()
                 return
             except asyncio.CancelledError:
                 raise
+            except FATAL_AUTH_ERRORS as e:
+                await self.fatal(f"{name}: {type(e).__name__}")
+                return
             except Exception as e:
                 logger.exception("[%s] задача %s упала: %s", self.label, name, e)
                 await self.tg_logger.log(f"Задача {name} упала, перезапуск через {backoff}с", error=repr(e)[:200])
+                if time.monotonic() - began > 600:
+                    backoff = 15
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 600)
 
     async def _watchdog(self):
-        """Если соединение пропало и Telethon сам не поднял — поднимаем."""
+        """Сторож соединения. Если клиент отвалился и Telethon сам не поднял — поднимаем; если идём
+        через прокси и он, похоже, мёртв — переходим на IP Render. Раз в ~10 минут проверяем, что
+        аккаунт жив (бан/отзыв сессии иначе молча глотаются внутри циклов заданий)."""
         misses = 0
+        ticks = 0
         while True:
-            await asyncio.sleep(60)
+            await asyncio.sleep(30)
+            ticks += 1
             if self.client.is_connected():
                 misses = 0
+                if ticks % 20 == 0:
+                    try:
+                        await self.client.get_me()
+                    except FATAL_AUTH_ERRORS as e:
+                        await self.fatal(f"{type(e).__name__} (проверка аккаунта)")
+                        return
+                    except Exception as e:
+                        logger.debug("[%s] проверка аккаунта: %s", self.label, e)
                 continue
             misses += 1
-            if misses >= 2:
-                logger.warning("[%s] нет соединения, переподключаюсь", self.label)
+            if misses >= 3:
+                logger.warning("[%s] нет соединения ~%dс, переподключаюсь", self.label, misses * 30)
                 try:
+                    if await self.proxy.on_client_down():
+                        misses = 0
+                        continue
                     await self.client.connect()
+                    try:
+                        await self.client.catch_up()
+                    except Exception:
+                        pass
                     misses = 0
+                except FATAL_AUTH_ERRORS as e:
+                    await self.fatal(f"{type(e).__name__} при переподключении")
+                    return
                 except Exception as e:
                     logger.warning("[%s] переподключение не удалось: %s", self.label, e)
 
@@ -305,4 +400,9 @@ class PatrickAccount:
         try:
             await self.client.disconnect()
         finally:
-            await self.db.stop()
+            # аренду освобождаем ПОСЛЕ отключения клиента и ДО закрытия БД: новый инстанс
+            # подключится сразу, но не раньше, чем мы отпустили сессию
+            try:
+                await self.lease.release()
+            finally:
+                await self.db.stop()
