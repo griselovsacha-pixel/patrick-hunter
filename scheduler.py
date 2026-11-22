@@ -23,7 +23,11 @@ MISSED_MIN = int(os.getenv("SCHED_MISSED_MIN_SEC", "180"))
 MISSED_MAX = int(os.getenv("SCHED_MISSED_MAX_SEC", "900"))
 ACCOUNT_STAGGER = int(os.getenv("SCHED_ACCOUNT_STAGGER_SEC", "240"))
 
-JOBS = ("daily", "tasks", "clicker", "crawler", "warmup")   # warmup — служебная запись (дата начала прогрева)
+# warmup / settings / lease — служебные записи: дата начала прогрева, настройки аккаунта из админки
+# (режим прокси, длительность прогрева), «аренда» сессии (защита от двух инстансов).
+JOBS = ("daily", "tasks", "clicker", "crawler", "warmup", "settings", "lease")
+HIDDEN_JOBS = ("warmup", "settings", "lease")
+WARMUP_MAX_DAYS = 60
 WARMUP_MIN_FACTOR = float(os.getenv("WARMUP_MIN_FACTOR", "0.2"))   # доля обычной нагрузки в первый день прогрева
 
 
@@ -51,12 +55,12 @@ class JobScheduler:
         self._loaded = False
         digits = "".join(ch for ch in label if ch.isdigit())
         self.number = int(digits or "1")
-        # Прогрев: ACCOUNT_<N>_WARMUP_DAYS=5 (0/не задано — выключен). Нагрузка растёт от
-        # WARMUP_MIN_FACTOR до 100% за указанное число дней, отсчёт — с первого запуска аккаунта.
+        # Прогрев теперь включается из админки (хранится в БД). Переменная
+        # ACCOUNT_<N>_WARMUP_DAYS осталась как значение ПО УМОЛЧАНИЮ, пока в админке ничего не задано.
         try:
-            self.warmup_days = max(0, int(os.getenv(f"ACCOUNT_{self.number}_WARMUP_DAYS", "0") or 0))
+            self._env_warmup_days = max(0, int(os.getenv(f"ACCOUNT_{self.number}_WARMUP_DAYS", "0") or 0))
         except ValueError:
-            self.warmup_days = 0
+            self._env_warmup_days = 0
 
     # ---------- БД ----------
     async def load(self):
@@ -79,19 +83,48 @@ class JobScheduler:
             st["data"] = r.get("data") or {}
         await self._warmup_boot()
 
-    async def _save(self, job):
+    async def _save(self, job) -> bool:
+        """True — запись попала в БД. Любой сбой БД не мешает работе (состояние живёт в памяти)."""
         st = self.state[job]
         try:
-            await self.db.job_save(
+            return bool(await self.db.job_save(
                 job,
                 st["next"].isoformat() if st["next"] else None,
                 st["last"].isoformat() if st["last"] else None,
                 st["status"], st["message"], st["data"],
-            )
+            ))
         except Exception as e:
             logger.debug("[%s] расписание: не сохранить %s: %s", self.label, job, e)
+            return False
+
+    # ---------- настройки аккаунта (из админки, переживают рестарт) ----------
+    def setting(self, key, default=None):
+        v = (self.state["settings"]["data"] or {}).get(key)
+        return default if v is None else v
+
+    async def set_settings(self, **kw) -> bool:
+        """Меняет настройки аккаунта (None — удалить ключ). -> True, если сохранено в БД."""
+        data = dict(self.state["settings"]["data"] or {})
+        for k, v in kw.items():
+            if v is None:
+                data.pop(k, None)
+            else:
+                data[k] = v
+        self.state["settings"]["data"] = data
+        return await self._save("settings")
 
     # ---------- прогрев ----------
+    @property
+    def warmup_days(self) -> int:
+        """Длительность прогрева в днях: из админки (БД), иначе из env. 0 — выключен."""
+        v = self.setting("warmup_days")
+        if v is not None:
+            try:
+                return max(0, min(int(v), WARMUP_MAX_DAYS))
+            except (TypeError, ValueError):
+                pass
+        return self._env_warmup_days
+
     async def _warmup_boot(self):
         if self.warmup_days <= 0:
             return
@@ -101,6 +134,16 @@ class JobScheduler:
             self.state["warmup"]["data"] = data
             await self._save("warmup")
             logger.info("[%s] прогрев: старт, %d дн.", self.label, self.warmup_days)
+
+    async def start_warmup(self, days: int) -> bool:
+        """Из админки: включить прогрев на N дней, отсчёт — с этой минуты. days=0 — выключить.
+        Нагрузка подхватывается на лету: задания — со следующего цикла, клики — со следующего слота."""
+        days = max(0, min(int(days), WARMUP_MAX_DAYS))
+        self.state["warmup"]["data"] = {"start": _now().isoformat(), "days": days} if days else {}
+        await self._save("warmup")
+        ok = await self.set_settings(warmup_days=days)
+        logger.info("[%s] прогрев из админки: %s", self.label, f"{days} дн." if days else "выключен")
+        return ok
 
     def warmup_factor(self) -> float:
         """Доля обычной нагрузки: 1.0 — полная (прогрев выключен или закончен)."""
@@ -122,9 +165,12 @@ class JobScheduler:
         f = self.warmup_factor()
         start = _parse((self.state["warmup"]["data"] or {}).get("start"))
         day = int((_now() - start).total_seconds() // 86400) + 1 if start else 1
+        ends = start + datetime.timedelta(days=self.warmup_days) if (start and self.warmup_days) else None
         return {"enabled": self.warmup_days > 0, "active": f < 1.0, "days": self.warmup_days,
                 "day": min(day, self.warmup_days) if self.warmup_days else 0,
-                "factor": round(f, 2), "start": start.isoformat() if start else None}
+                "factor": round(f, 2), "start": start.isoformat() if start else None,
+                "ends_at": ends.isoformat() if ends else None,
+                "from_admin": self.setting("warmup_days") is not None}
 
     # ---------- план ----------
     async def plan_initial(self, job: str, first_range=(300, 900)) -> float:
@@ -189,7 +235,7 @@ class JobScheduler:
     def snapshot(self) -> dict:
         out = {}
         for job, st in self.state.items():
-            if job == "warmup":
+            if job in HIDDEN_JOBS:
                 continue
             out[job] = {
                 "next": st["next"].isoformat() if st["next"] else None,
