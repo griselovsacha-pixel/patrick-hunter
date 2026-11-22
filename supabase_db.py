@@ -326,9 +326,20 @@ class SupabaseStore:
             params={"select": "*", "account_number": f"eq.{self._account_number()}"},
         ) or []
 
-    async def job_save(self, job, next_run_at, last_run_at, status, message, data):
+    async def job_get(self, job):
+        """Одна строка job_schedule этого аккаунта (свежее чтение, без кэша) или None."""
         if not self.enabled or not self.session:
-            return
+            return None
+        rows = await self._request(
+            "GET", "/rest/v1/job_schedule",
+            params={"select": "*", "account_number": f"eq.{self._account_number()}", "job": f"eq.{job}"},
+        ) or []
+        return rows[0] if rows else None
+
+    async def job_save(self, job, next_run_at, last_run_at, status, message, data):
+        """-> True, если запись попала в БД."""
+        if not self.enabled or not self.session:
+            return False
         await self._request(
             "POST", "/rest/v1/job_schedule",
             params={"on_conflict": "account_number,job"},
@@ -340,6 +351,7 @@ class SupabaseStore:
             },
             extra_headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
         )
+        return True
 
     # ---------- автовывод (withdraw.py) ----------
     @staticmethod
