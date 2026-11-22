@@ -41,6 +41,31 @@ logger = logging.getLogger(__name__)
 
 MAX_TASKS_PER_CYCLE = 30
 
+# Память о заданиях, которые бот не засчитывает. По «Обучению» одни и те же задания (запуск
+# приложения, подписка по ссылке) проваливались по 140-150 раз за 10 дней: каждый цикл аккаунт
+# заново вступал в чаты / стартовал ботов / открывал мини-апп, ждал и снова получал «не выполнено».
+FAIL_SKIP_AFTER = 2             # после стольких неудач подряд задание сразу пропускаем, не выполняя
+FAIL_RETRY_AFTER_SEC = 6 * 3600  # но раз в 6 часов даём ему ещё один шанс
+FAIL_MEMORY_SEC = 3 * 86400     # забываем задания, которых не видели 3 дня
+# «Упс! Что-то сломалось» — сбой на стороне бота, а не признак «задание невыполнимо»: не считаем.
+TRANSIENT_ALERT_WORDS = ("сломал", "упс")
+
+
+def task_id(msg):
+    """ID задания из callback-кнопки подтверждения (task:<id>:<1|0>)."""
+    btn = find_button_by_data(msg, ("task:",))
+    if not btn:
+        return None
+    try:
+        parts = bytes(btn.data).decode("utf-8", "ignore").split(":")
+        return parts[1] if len(parts) > 1 and parts[1] else None
+    except Exception:
+        return None
+
+
+def has_skip(msg) -> bool:
+    return bool(find_button(msg, ["пропустить"]) or find_button_by_data(msg, ("skip_task:",)))
+
 
 class TaskRunner:
     def __init__(self, client, core, tg_logger, profile_stats, label: str, db=None):
@@ -84,6 +109,40 @@ class TaskRunner:
     # ------------------------------------------------------------------
     # Одно задание
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Память о невыполнимых заданиях (переживает рестарт: хранится в job_schedule.data)
+    # ------------------------------------------------------------------
+    def _fails(self) -> dict:
+        data = self.sched.get_data("tasks") if self.sched else {}
+        return data.setdefault("fails", {}) if isinstance(data, dict) else {}
+
+    def _should_preskip(self, tid) -> bool:
+        rec = self._fails().get(str(tid))
+        if not rec or rec.get("n", 0) < FAIL_SKIP_AFTER:
+            return False
+        return time.time() - float(rec.get("ts") or 0) < FAIL_RETRY_AFTER_SEC
+
+    async def _note_result(self, tid, ok: bool):
+        if not tid or not self.sched:
+            return
+        data = self.sched.get_data("tasks")
+        data = dict(data) if isinstance(data, dict) else {}
+        fails = dict(data.get("fails") or {})
+        now = time.time()
+        fails = {k: v for k, v in fails.items() if now - float(v.get("ts") or 0) < FAIL_MEMORY_SEC}
+        if ok:
+            fails.pop(str(tid), None)
+        else:
+            rec = fails.get(str(tid)) or {"n": 0}
+            fails[str(tid)] = {"n": int(rec.get("n", 0)) + 1, "ts": now}
+        data["fails"] = fails
+        await self.sched.set_data("tasks", data)
+
+    def _cycle_limit(self) -> int:
+        """Прогрев: чем «моложе» аккаунт, тем меньше заданий за цикл."""
+        f = self.sched.warmup_factor() if self.sched else 1.0
+        return max(4, round(MAX_TASKS_PER_CYCLE * f))
+
     async def _click_skip(self, msg) -> bool:
         btn = find_button(msg, ["пропустить"]) or find_button_by_data(msg, ("skip_task:",))
         if not btn:
@@ -236,6 +295,14 @@ class TaskRunner:
             await self.tg_logger.log("Платное задание без кнопки Пропустить", error="ручное вмешательство")
             return "failed", "платное задание без кнопки Пропустить", reward
 
+        tid = task_id(task_msg)
+        if tid and has_skip(task_msg) and self._should_preskip(tid):
+            n = self._fails().get(str(tid), {}).get("n", 0)
+            await self.tg_logger.log(f"⏭️ Задание {tid} не засчитывалось уже {n} раз — пропускаю без выполнения "
+                                     f"(новая попытка через ≤{FAIL_RETRY_AFTER_SEC // 3600} ч)\n📄 {text[:80]}")
+            if await self._click_skip(task_msg):
+                return "skip", f"известно, что не засчитывается (задание {tid})", reward
+
         ok_parts, failed, is_miniapp = await self._do_actions(task_msg, text)
         desc = ", ".join(ok_parts) if ok_parts else "ничего не удалось выполнить"
         if failed:
@@ -253,8 +320,11 @@ class TaskRunner:
 
         verdict, alert, had_btn = await self._confirm(task_msg, did_something=True)
         if verdict == "ok":
+            await self._note_result(tid, True)
             return "done", desc, reward
         if verdict == "fail":
+            if not any(w in alert.lower() for w in TRANSIENT_ALERT_WORDS):
+                await self._note_result(tid, False)
             return "failed", f"{desc} — бот: {alert[:70]}", reward
         note = "ответ бота не распознан" + (f": {alert[:60]}" if alert else "")
         if not had_btn:
@@ -357,7 +427,11 @@ class TaskRunner:
         errors_in_row = 0
         reason_end = "лимит"
 
-        for i in range(MAX_TASKS_PER_CYCLE):
+        limit = self._cycle_limit()
+        if limit < MAX_TASKS_PER_CYCLE:
+            await self.tg_logger.log(f"🌱 Прогрев: за цикл не больше {limit} заданий")
+        for i in range(limit):
+            task_msg = None
             try:
                 async with self.core.bot_lock.acquire():
                     kind, task_msg = await self._next_task(prev_sig, since)
@@ -426,6 +500,19 @@ class TaskRunner:
                 counters["failed"] += 1
                 await self.tg_logger.log(f"❌ Задание не засчитано\n📌 {desc}")
                 await human_delay(2, 4)
+                # Бот после «не выполнено» задание не меняет — раньше мы ещё ~14 с опрашивали историю
+                # (≈12 запросов) и только потом нажимали «Пропустить». Теперь пропускаем сразу.
+                if task_msg is not None and has_skip(task_msg):
+                    try:
+                        async with self.core.bot_lock.acquire():
+                            cur = await self._refetch(task_msg)
+                            if await self._click_skip(cur):
+                                counters["skip"] += 1
+                                since = utcnow()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        logger.warning(f"[{self.label}] Быстрый пропуск: {e}")
             elif result == "skip":
                 counters["skip"] += 1
                 await human_delay(2, 4)
