@@ -17,10 +17,8 @@ from fastapi import Header, HTTPException
 from fastapi.responses import FileResponse, Response
 from fastapi import FastAPI, Request
 
-from telethon import errors as tg_errors
-
 from config import load_account_sessions, ACCOUNT_START_STAGGER_SEC
-from account import PatrickAccount
+from account import PatrickAccount, FATAL_AUTH_ERRORS
 from hub import Hub
 from memguard import memory_guard_cycle, rss_mb
 from supabase_db import supabase_headers
@@ -38,16 +36,6 @@ logger = logging.getLogger(__name__)
 accounts: list = []
 _background_tasks: list = []
 hub = Hub()
-
-# Ошибки, при которых повторный старт аккаунта бессмыслен (сессия умерла).
-FATAL_AUTH_ERRORS = tuple(
-    getattr(tg_errors, name)
-    for name in (
-        "AuthKeyError", "AuthKeyUnregisteredError", "SessionRevokedError",
-        "SessionExpiredError", "UserDeactivatedError", "UserDeactivatedBanError",
-    )
-    if hasattr(tg_errors, name)
-)
 
 ADMIN_TIMEZONE = ZoneInfo("Europe/Kyiv")
 
@@ -98,6 +86,7 @@ async def run_account(acc: PatrickAccount):
         except asyncio.CancelledError:
             raise
         except FATAL_AUTH_ERRORS as e:
+            acc.dead = f"{type(e).__name__}: сессия недействительна"
             logger.error("❌ [%s] сессия недействительна (%s) — аккаунт отключён, "
                          "нужна новая TELEGRAM_SESSION", acc.label, type(e).__name__)
             try:
@@ -727,7 +716,7 @@ async def admin_jobs(authorization: str | None = Header(default=None)):
         if not getattr(acc, "crawler", None):
             snap.pop("crawler", None)
         out.append({"account": _acc_number(acc), "label": acc.label, "ready": bool(acc.ready), "jobs": snap,
-                    "warmup": sched.warmup_info()})
+                    "warmup": sched.warmup_info(), "dead": acc.dead, "proxy": await _proxy_public(acc)})
     return {"accounts": out, "titles": JOB_TITLES}
 
 
@@ -746,19 +735,23 @@ async def admin_run(account: int, job: str, authorization: str | None = Header(d
     return {"ok": True}
 
 
-def _proxy_public(acc) -> dict:
-    """Состояние прокси аккаунта для админки (без логина/пароля)."""
-    mon = getattr(acc, "proxy", None)
-    state = dict(mon.state) if mon else {"configured": False, "status": "unknown"}
-    state["connected"] = bool(acc.client.is_connected())
-    return state
+async def _proxy_public(acc) -> dict:
+    """Состояние маршрута аккаунта для админки (без логина/пароля)."""
+    mgr = getattr(acc, "proxy", None)
+    if not mgr:
+        return {"configured": False, "status": "unknown", "connected": bool(acc.client.is_connected())}
+    try:
+        return await mgr.public()
+    except Exception as e:
+        logger.debug("proxy public: %r", e)
+        return {"configured": False, "status": "unknown", "connected": bool(acc.client.is_connected())}
 
 
 @app.get("/api/admin/proxies")
 async def admin_proxies(authorization: str | None = Header(default=None)):
     check_admin_auth(authorization)
     return {"accounts": [
-        {"account": _acc_number(a), "label": a.label, "proxy": _proxy_public(a)} for a in accounts
+        {"account": _acc_number(a), "label": a.label, "proxy": await _proxy_public(a)} for a in accounts
     ]}
 
 
@@ -771,8 +764,64 @@ async def admin_proxies_check(account: int = 0, authorization: str | None = Head
         raise HTTPException(status_code=404, detail="Аккаунт не найден")
     await asyncio.gather(*(a.proxy.refresh() for a in targets), return_exceptions=True)
     return {"accounts": [
-        {"account": _acc_number(a), "label": a.label, "proxy": _proxy_public(a)} for a in targets
+        {"account": _acc_number(a), "label": a.label, "proxy": await _proxy_public(a)} for a in targets
     ]}
+
+
+def _account_or_404(number: int):
+    acc = next((a for a in accounts if _acc_number(a) == number), None)
+    if not acc:
+        raise HTTPException(status_code=404, detail="Аккаунт не найден")
+    return acc
+
+
+@app.post("/api/admin/proxy/mode")
+async def admin_proxy_mode(account: int, mode: str, authorization: str | None = Header(default=None)):
+    """Режим маршрута аккаунта: auto (прокси, при аварии — IP Render) | on (только прокси) | off (напрямую, IP Render)."""
+    check_admin_auth(authorization)
+    acc = _account_or_404(account)
+    if acc.dead:
+        raise HTTPException(status_code=409, detail=f"Аккаунт остановлен: {acc.dead}")
+    try:
+        persisted = await acc.proxy.set_mode(mode)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Не удалось переключить: {type(e).__name__}: {str(e)[:150]}")
+    return {"ok": True, "saved": persisted, "proxy": await _proxy_public(acc)}
+
+
+@app.post("/api/admin/proxy/url")
+async def admin_proxy_url(request: Request, authorization: str | None = Header(default=None)):
+    """Задать адрес прокси аккаунта из админки (пустой url — убрать и вернуться к переменной ACCOUNT_<N>_PROXY)."""
+    check_admin_auth(authorization)
+    b = await request.json()
+    acc = _account_or_404(int(b.get("account") or 0))
+    if acc.dead:
+        raise HTTPException(status_code=409, detail=f"Аккаунт остановлен: {acc.dead}")
+    try:
+        persisted = await acc.proxy.set_url(str(b.get("url") or ""))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Не удалось применить: {type(e).__name__}: {str(e)[:150]}")
+    return {"ok": True, "saved": persisted, "proxy": await _proxy_public(acc)}
+
+
+@app.post("/api/admin/warmup")
+async def admin_warmup(request: Request, authorization: str | None = Header(default=None)):
+    """Прогрев аккаунта: days > 0 — включить на N дней (отсчёт с этой минуты), 0 — выключить."""
+    check_admin_auth(authorization)
+    b = await request.json()
+    acc = _account_or_404(int(b.get("account") or 0))
+    try:
+        days = int(b.get("days"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="days: целое число дней (0 — выключить)")
+    if not 0 <= days <= 60:
+        raise HTTPException(status_code=400, detail="days: от 0 до 60")
+    persisted = await acc.sched.start_warmup(days)
+    return {"ok": True, "saved": persisted, "warmup": acc.sched.warmup_info()}
 
 
 @app.post("/api/admin/probe-withdraw")
@@ -1030,6 +1079,7 @@ async def admin_overview(
 
     runtime_status = {}
     proxy_status = {}
+    dead_status = {}
 
     for acc in accounts:
         try:
@@ -1044,7 +1094,8 @@ async def admin_overview(
             runtime_status[number] = bool(
                 acc.client.is_connected()
             )
-            proxy_status[number] = _proxy_public(acc)
+            dead_status[number] = acc.dead
+            proxy_status[number] = await _proxy_public(acc)
 
         except Exception:
             continue
@@ -1056,6 +1107,7 @@ async def admin_overview(
         )
 
         row["proxy"] = proxy_status.get(number)
+        row["dead"] = dead_status.get(number)
 
         if number in runtime_status:
             row["connected"] = (
