@@ -14,6 +14,7 @@ from config import (
 )
 from utils import human_delay, classify_click_alert, parse_cooldown_seconds
 from core import utcnow
+from knowledge import is_ad
 
 logger = logging.getLogger(__name__)
 
@@ -64,9 +65,17 @@ class Clicker:
         finally:
             await self.sched.end("clicker", status, "ручной клик")
 
+    def _slot_active(self, i: int, total: int) -> bool:
+        """Прогрев: из `total` слотов дня выполняем долю warmup_factor, равномерно по дню."""
+        f = self.sched.warmup_factor()
+        if f >= 1.0:
+            return True
+        return int((i + 1) * f + 1e-9) > int(i * f + 1e-9)
+
     def _make_plan(self, now):
+        # План дня всегда полный; прогрев «прореживает» слоты на лету (см. _slot_active), поэтому его
+        # можно включить/выключить из админки в любой момент — без пересоздания плана.
         times_today = random.randint(CLICKER_MIN_PER_DAY, CLICKER_MAX_PER_DAY)
-        times_today = max(3, round(times_today * self.sched.warmup_factor()))   # прогрев: меньше кликов
         window_sec = (CLICKER_END_HOUR - CLICKER_START_HOUR) * 3600
         part_sec = window_sec // times_today
         day_start = now.replace(hour=CLICKER_START_HOUR, minute=0, second=0, microsecond=0)
@@ -98,7 +107,7 @@ class Clicker:
                     plan = self._make_plan(now)
                     await self.sched.set_data("clicker", plan)
                 times = [datetime.datetime.fromisoformat(t) for t in plan["times"]]
-                self.target_today = len(times)
+                self.target_today = sum(1 for k in range(len(times)) if self._slot_active(k, len(times)))
                 self.profile_stats.clicker_clicks_today = max(self.profile_stats.clicker_clicks_today, plan["done"])
 
                 if first:
@@ -118,6 +127,16 @@ class Clicker:
                             seconds=random.uniform(240, 600) + self.sched.index * 240)
 
                 while plan["done"] < len(times):
+                    # прогрев: пропускаем лишние слоты (не ждём их времени)
+                    thinned = 0
+                    while plan["done"] < len(times) and not self._slot_active(plan["done"], len(times)):
+                        plan["done"] += 1
+                        thinned += 1
+                    if thinned:
+                        self.target_today = max(1, len(times) - thinned)
+                        await self.sched.set_data("clicker", plan)
+                    if plan["done"] >= len(times):
+                        break
                     await self._wait_until(times[plan["done"]])
                     self.sched.begin("clicker")
                     status = "error"
@@ -146,6 +165,18 @@ class Clicker:
     async def _click_slot(self, index: int, total: int):
         """Один слот: клик + ожидание кулдауна / выполнение заданий и одна повторная попытка."""
         status, wait = await self._do_one_click(index, total)
+        if status == "ad":
+            # Бот показал рекламную вставку вместо всплывающего ответа (по «Обучению» — ~9% кликов).
+            # По ежедневке видно, что действие при этом БЫВАЕТ засчитано (потом приходит кулдаун).
+            # Нажимаем ещё раз: «подожди 00:xx» значит, что первый клик уже засчитан; «получил» — что
+            # засчитан этот. В обоих случаях слот дня выполнен ровно один раз.
+            await human_delay(3, 7)
+            status, wait = await self._do_one_click(index, total)
+            if status == "cooldown":
+                await self._record_click(index, total, "засчитан (бот показал рекламу вместо ответа, кулдаун подтвердил)")
+                return "ok"
+            if status == "ad":
+                status = "unknown"
         if status == "cooldown" and 0 < wait <= 900:
             await asyncio.sleep(wait + random.uniform(5, 25))
             status, wait = await self._do_one_click(index, total)
@@ -153,6 +184,18 @@ class Clicker:
             await self._wait_for_tasks()
             status, wait = await self._do_one_click(index, total)
         return status
+
+    async def _record_click(self, index, total, note: str = ""):
+        self.profile_stats.clicker_clicks_today += 1
+        if self.db:
+            await self.db.event("click", stars=0.10)
+        await self.tg_logger.log(f"🎮 Клик {self._tag(index, total)} " + (note or "засчитан"))
+        if self.profile_stats.clicker_clicks_today % 10 == 0:
+            try:
+                async with self.core.bot_lock.acquire():
+                    await self._refresh_balance()
+            except Exception as e:
+                logger.warning(f"[{self.label}] баланс после клика: {e}")
 
     async def _wait_for_tasks(self):
         """Бот не даёт кликать, пока не выполнены задания: просим TaskRunner запустить
@@ -228,6 +271,14 @@ class Clicker:
                     # (NFT/ГДЗ) вместо клика. Раньше это считалось «клик засчитан» — ложно.
                     resp = await self.core.wait_fresh(since, timeout=6)
                     first = ((resp.text or "").strip().splitlines() or [""])[0][:60] if resp else ""
+                    low_resp = (resp.text or "").lower() if resp else ""
+                    if resp and "новые задания" in low_resp and "доступны" in low_resp:
+                        # «💫 Возможно, тебе уже доступны новые задания!» — это тот же «выполни задания»
+                        await self.tg_logger.log(f"🎮 Клик {self._tag(index, total)}: бот просит выполнить задания")
+                        return "gate", 0
+                    if resp and is_ad(resp):
+                        await self.tg_logger.log(f"🎮 Клик {self._tag(index, total)}: вместо ответа реклама «{first}» — перепроверю")
+                        return "ad", 0
                     if resp and "проверка" in (resp.text or "").lower():
                         solved = await self.core.captcha.solve_if_needed(resp)
                         await self.tg_logger.log(
