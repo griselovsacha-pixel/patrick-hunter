@@ -12,11 +12,12 @@ BioManager — когда ежедневка просит "поставь сво
 и это главное.
 """
 import logging
+import os
 
 from telethon.tl.functions.account import UpdateProfileRequest, SetPrivacyRequest
 from telethon.tl import types
 
-from config import referral_link_for
+from config import referral_link_for, TARGET_BOT
 from antiban import safe_call
 
 logger = logging.getLogger(__name__)
@@ -29,13 +30,30 @@ class BioManager:
         self.label = label
         self._bio_already_set = False
         digits = "".join(ch for ch in label if ch.isdigit())
-        self.referral_link = referral_link_for(int(digits or "1"))
+        self.number = int(digits or "1")
+        self.user_id = None   # Telegram ID аккаунта — ставится из account.start() после входа
+
+    @property
+    def referral_link(self):
+        """Личная ссылка аккаунта. Раньше ссылки были ЗАШИТЫ в config по номеру слота — при замене
+        аккаунта (новая покупка в тот же слот) в био ставилась ссылка СТАРОГО аккаунта, и рефералы
+        шли ему. Теперь по умолчанию — t.me/<бот>?start=<ID самого аккаунта> (формат подтверждён
+        экраном «Заработать звезды»); REFERRAL_LINK_<N> в env по-прежнему главнее."""
+        env = (os.getenv(f"REFERRAL_LINK_{self.number}") or "").strip()
+        if env:
+            return env
+        if self.user_id:
+            return f"https://t.me/{TARGET_BOT}?start={self.user_id}"
+        return referral_link_for(self.number)
 
     async def ensure_referral_bio(self, force: bool = False):
         """Проставить реф. ссылку в описание. force=True — бот только что пожаловался
         на отсутствие ссылки: перепроверяем фактическое описание и ставим заново
         (раньше флаг _bio_already_set блокировал повтор, и цикл «поставил → бот
         снова просит» шёл бесконечно, хотя в профиле ссылки уже могло не быть)."""
+        if not self.referral_link:
+            await self.tg_logger.log("📝 Не знаю реф. ссылку аккаунта (нет ID и REFERRAL_LINK_<N>)", error="нет ссылки")
+            return False
         if self._bio_already_set and not force:
             return True
         if not force:
