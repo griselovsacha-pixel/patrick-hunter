@@ -28,6 +28,7 @@ class TgLogger:
         self.label = label
         self.db = db
         self.group_entity = None  # резолвится в setup()
+        self.protection = None    # AccountProtection — ставится из account.py (kind='log': логи ничего не ждут)
         # Лог НИКОГДА не должен тормозить рабочий код. Раньше log() делал
         # запись в Supabase и send_message в группу прямо в вызывающем
         # коде: на горячем пути промокода это +1-3с до первой попытки, а
@@ -42,7 +43,8 @@ class TgLogger:
         Если группа недоступна — не роняем весь бот, просто пишем в консоль."""
         invite_hash = LOG_GROUP_INVITE.split('+')[-1]
         try:
-            updates = await self.client(ImportChatInviteRequest(invite_hash))
+            updates = await safe_call(lambda: self.client(ImportChatInviteRequest(invite_hash)),
+                                          action="log_join_group", protection=self.protection, kind="log")
             self.group_entity = updates.chats[0]
         except UserAlreadyParticipantError:
             try:
@@ -109,11 +111,12 @@ class TgLogger:
         try:
             msg = await safe_call(
                 lambda: self.client.send_message(self.group_entity, line),
-                action="log_to_group",
+                action="log_to_group", protection=self.protection, kind="log",
             )
             if pin or error:
                 try:
-                    await self.client.pin_message(self.group_entity, msg, notify=bool(error))
+                    await safe_call(lambda: self.client.pin_message(self.group_entity, msg, notify=bool(error)),
+                                    action="log_pin", protection=self.protection, kind="log", max_retries=2)
                 except Exception as e:
                     logger.warning(f"[{self.label}] Не удалось закрепить сообщение: {e}")
         except Exception as e:
