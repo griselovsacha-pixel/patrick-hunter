@@ -16,6 +16,18 @@ class CaptchaSolver:
         self.client = client
         self.tg_logger = tg_logger
         self.label = label
+        self.core = None   # BotCore — ставится из account.py: клики идут через защиту аккаунта
+
+    async def _delay(self, lo, hi):
+        if self.core is not None:
+            await self.core.delay(lo, hi)
+        else:
+            await human_delay(lo, hi)
+
+    async def _click(self, btn):
+        if self.core is not None:
+            return await self.core.click_raw(btn)
+        return await btn.click()
 
     async def solve_if_needed(self, msg) -> bool:
         """Возвращает True, если капчи не было ИЛИ она успешно решена."""
@@ -39,11 +51,11 @@ class CaptchaSolver:
                 for btn in row:
                     if btn.text.strip() == str(res):
                         try:
-                            await btn.click()
+                            await self._click(btn)
                         except Exception as e:
                             logger.warning(f"⚠️ [{self.label}] Клик капчи не удался: {e}")
                             return False
-                        await human_delay(2, 3)
+                        await self._delay(2, 3)
                         await self.tg_logger.log(f"🤖 Капча (математика) решена: {res}")
                         return True
             await self.tg_logger.log(f"🤖 Капча: ответ {res} не найден среди кнопок", error=str(all_btns))
@@ -61,11 +73,11 @@ class CaptchaSolver:
                     btn_text = btn.text.strip()
                     if (target_emoji and target_emoji in btn_text) or target_word in btn_text.lower():
                         try:
-                            await btn.click()
+                            await self._click(btn)
                         except Exception as e:
                             logger.warning(f"⚠️ [{self.label}] Клик капчи не удался: {e}")
                             return False
-                        await human_delay(2, 3)
+                        await self._delay(2, 3)
                         await self.tg_logger.log(f"🤖 Капча (фрукт) решена: '{target_word}' → {btn_text}")
                         return True
 
@@ -79,11 +91,11 @@ class CaptchaSolver:
                 for btn in row:
                     if target_emoji in btn.text.strip():
                         try:
-                            await btn.click()
+                            await self._click(btn)
                         except Exception as e:
                             logger.warning(f"⚠️ [{self.label}] Клик капчи не удался: {e}")
                             return False
-                        await human_delay(2, 3)
+                        await self._delay(2, 3)
                         await self.tg_logger.log(f"🤖 Капча (фрукт, фолбэк) решена: '{matched_kw}'")
                         return True
 
