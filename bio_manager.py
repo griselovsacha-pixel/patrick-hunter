@@ -31,6 +31,7 @@ class BioManager:
         self._bio_already_set = False
         digits = "".join(ch for ch in label if ch.isdigit())
         self.number = int(digits or "1")
+        self.protection = None   # AccountProtection — ставится из account.py
         self.user_id = None   # Telegram ID аккаунта — ставится из account.start() после входа
 
     @property
@@ -66,7 +67,7 @@ class BioManager:
         try:
             await safe_call(
                 lambda: self.client(UpdateProfileRequest(about=self.referral_link)),
-                action="update_bio",
+                action="update_bio", protection=self.protection,
             )
             await self._make_bio_public()
             actual = await self._read_bio()
@@ -107,7 +108,7 @@ class BioManager:
                     key=key,
                     rules=[types.InputPrivacyValueAllowAll()],
                 )),
-                action="set_bio_privacy",
+                action="set_bio_privacy", protection=self.protection,
             )
         except Exception as e:
             logger.warning(f"[{self.label}] Не удалось открыть приватность био: {e}")
