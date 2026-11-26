@@ -38,7 +38,6 @@ from config import (
     MINIAPP_PROLONG_INTERVAL_SEC,
     MINIAPP_HANDLER_TIMEOUT_SEC,
 )
-from antiban import safe_call
 
 logger = logging.getLogger(__name__)
 
@@ -203,7 +202,7 @@ class MiniAppRunner:
         bot_user = utils.get_input_user(bot_peer)
 
         if short:
-            res = await safe_call(
+            res = await self.core.api(
                 lambda: self.client(functions.messages.RequestAppWebViewRequest(
                     peer=bot_peer,
                     app=types.InputBotAppShortName(bot_id=bot_user, short_name=short),
@@ -227,7 +226,7 @@ class MiniAppRunner:
                         "⚠️ Ссылки t.me/бот?startapp=… (главное приложение) не открываются: "
                         "обновите telethon (в requirements.txt нужен >=1.40)", error="старый telethon")
                 return None
-            res = await safe_call(
+            res = await self.core.api(
                 lambda: self.client(req_cls(
                     peer=bot_peer, bot=bot_user, platform=MINIAPP_PLATFORM,
                     start_param=start_param or None,
@@ -258,14 +257,14 @@ class MiniAppRunner:
             bot_username = ""
 
         if kind == "KeyboardButtonWebView":
-            res = await safe_call(
+            res = await self.core.api(
                 lambda: self.client(functions.messages.RequestWebViewRequest(
                     peer=chat, bot=bot_user, platform=MINIAPP_PLATFORM, url=url,
                 )),
                 action="request_webview",
             )
         else:
-            res = await safe_call(
+            res = await self.core.api(
                 lambda: self.client(functions.messages.RequestSimpleWebViewRequest(
                     bot=bot_user, platform=MINIAPP_PLATFORM, url=url,
                 )),
@@ -290,7 +289,7 @@ class MiniAppRunner:
         while True:
             await asyncio.sleep(MINIAPP_PROLONG_INTERVAL_SEC)
             try:
-                await safe_call(
+                await self.core.api(
                     lambda: self.client(ProlongWebViewRequest(
                         peer=s.peer, bot=s.bot_user, query_id=s.query_id,
                     )),
