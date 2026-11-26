@@ -240,7 +240,7 @@ async def _flow(acc, job, save):
         # 4. ID друга
         await human_delay(3, 6)
         since = utcnow()
-        await safe_call(lambda: core.client.send_message(core_target(), friend), action="withdraw_send_id")
+        await core.api(lambda: core.client.send_message(core_target(), friend), action="withdraw_send_id")
         conf = await core.wait_fresh(
             since, timeout=20,
             predicate=lambda m: bool(find_button_by_data(m, prefixes=("giftsendtofriend_calback:",)))
