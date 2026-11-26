@@ -1,531 +1,336 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="ru" data-theme="dark">
 <head>
     <meta charset="UTF-8">
-    <meta
-        name="viewport"
-        content="width=device-width, initial-scale=1.0"
-    >
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#050505">
 
     <title>Patrick Hunter — Admin</title>
 
-    <link
-        rel="stylesheet"
-        href="/admin.css"
-    >
-</head>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23000'/%3E%3Ccircle cx='32' cy='32' r='24' fill='none' stroke='%23fff' stroke-width='3' stroke-dasharray='32 6.5' transform='rotate(6 32 32)'/%3E%3Cpolygon fill='%23fff' points='32,17 35.9,27.4 47,27.8 38.3,34.7 41.3,45.4 32,39.2 22.7,45.4 25.7,34.7 17,27.8 28.1,27.4'/%3E%3C/svg%3E">
 
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600;700&display=swap">
+    <link rel="stylesheet" href="/admin.css">
+</head>
 <body>
+
+<!-- ================= SVG SPRITE ================= -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+        <!-- Логотип: прицел + звезда -->
+        <symbol id="logo-mark" viewBox="0 0 64 64">
+            <g class="lm-ring">
+                <circle cx="32" cy="32" r="27" fill="none" stroke="currentColor" stroke-width="2.2"
+                        stroke-dasharray="36.2 6.2" transform="rotate(6.6 32 32)"/>
+            </g>
+            <g stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+                <line x1="32" y1="2" x2="32" y2="13"/>
+                <line x1="32" y1="51" x2="32" y2="62"/>
+                <line x1="2" y1="32" x2="13" y2="32"/>
+                <line x1="51" y1="32" x2="62" y2="32"/>
+            </g>
+            <polygon class="lm-star" fill="currentColor"
+                     points="32.00,19.00 35.17,27.63 44.36,27.98 37.14,33.67 39.64,42.52 32.00,37.40 24.36,42.52 26.86,33.67 19.64,27.98 28.83,27.63"/>
+        </symbol>
+
+        <symbol id="i-dashboard" viewBox="0 0 24 24"><path d="M3 3h8v10H3zM13 3h8v6h-8zM13 11h8v10h-8zM3 15h8v6H3z"/></symbol>
+        <symbol id="i-users" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.6-3.6 3.1-5.5 6.5-5.5s5.9 1.9 6.5 5.5"/><path d="M16 4.7a3.5 3.5 0 0 1 0 6.6M18 14.8c1.9.7 3.1 2.4 3.5 5.2"/></symbol>
+        <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></symbol>
+        <symbol id="i-list" viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13"/><circle cx="3.5" cy="6" r=".8"/><circle cx="3.5" cy="12" r=".8"/><circle cx="3.5" cy="18" r=".8"/></symbol>
+        <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/></symbol>
+        <symbol id="i-chip" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1.5"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/></symbol>
+        <symbol id="i-book" viewBox="0 0 24 24"><path d="M4 4.5A1.5 1.5 0 0 1 5.5 3H20v15H5.5A1.5 1.5 0 0 0 4 19.5z"/><path d="M4 19.5A1.5 1.5 0 0 0 5.5 21H20v-3M9 7h7"/></symbol>
+        <symbol id="i-out" viewBox="0 0 24 24"><path d="M7 17 17 7M8 7h9v9"/></symbol>
+        <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="m11 12 9-9M16 7l3 3M14 9l2 2"/></symbol>
+        <symbol id="i-star" viewBox="0 0 24 24"><path d="m12 3 2.7 5.8 6.3.7-4.7 4.3 1.3 6.2L12 16.8 6.4 20l1.3-6.2L3 9.5l6.3-.7z"/></symbol>
+        <symbol id="i-cursor" viewBox="0 0 24 24"><path d="m5 3 14 7-6 2-2 6z"/></symbol>
+        <symbol id="i-check" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8 12.3 2.7 2.7L16 9.5"/></symbol>
+        <symbol id="i-gift" viewBox="0 0 24 24"><rect x="3" y="8" width="18" height="4" rx="1"/><path d="M5 12v8h14v-8M12 8v12M12 8c-2.5 0-4.500-1-4.500-2.800S9 3 10.500 3 12 6 12 8zm0 0c2.500 0 4.500-1 4.500-2.800S15 3 13.500 3 12 6 12 8z"/></symbol>
+        <symbol id="i-ticket" viewBox="0 0 24 24"><path d="M3 8a2 2 0 0 0 0 8v2h18v-2a2 2 0 0 1 0-8V6H3z"/><path d="M14 6v2M14 11v2M14 16v2"/></symbol>
+        <symbol id="i-rocket" viewBox="0 0 24 24"><path d="M12 2c3.500 2 5.500 5.500 5.500 9.500L15 17H9l-2.500-5.500C6.500 7.500 8.500 4 12 2z"/><circle cx="12" cy="10" r="1.800"/><path d="M9 17l-1.500 4M15 17l1.500 4"/></symbol>
+        <symbol id="i-app" viewBox="0 0 24 24"><rect x="6" y="2.500" width="12" height="19" rx="2.500"/><path d="M10 18.500h4"/></symbol>
+        <symbol id="i-wallet" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h13v4"/><path d="M3 7v11a2 2 0 0 0 2 2h14a1 1 0 0 0 1-1V9a1 1 0 0 0-1-1H5a2 2 0 0 1-2-1z"/><circle cx="16.500" cy="14" r="1"/></symbol>
+        <symbol id="i-trend" viewBox="0 0 24 24"><path d="m3 17 6-6 4 4 8-8"/><path d="M15 7h6v6"/></symbol>
+        <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.300 5.700"/><path d="M20 4v7h-7"/></symbol>
+        <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.900 4.900l1.400 1.400M17.700 17.700l1.400 1.400M4.900 19.100l1.400-1.400M17.700 6.300l1.400-1.400"/></symbol>
+        <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.500A8 8 0 0 1 9.500 4 8 8 0 1 0 20 14.500z"/></symbol>
+        <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3 2 20h20z"/><path d="M12 10v4.500M12 17.500v.1"/></symbol>
+        <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3 4 6v6c0 4.500 3.200 7.700 8 9 4.800-1.300 8-4.500 8-9V6z"/></symbol>
+        <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.500 2.500 3.800 5.500 3.800 9S14.500 18.500 12 21c-2.500-2.500-3.800-5.500-3.800-9S9.500 5.500 12 3z"/></symbol>
+        <symbol id="i-leaf" viewBox="0 0 24 24"><path d="M5 19C5 10 10 4 20 4c0 9-5 15-13 15"/><path d="M5 19c2-4 5-7 9-9"/></symbol>
+        <symbol id="i-x" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+        <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+    </defs>
+</svg>
+
+<!-- ================= SPLASH ================= -->
+<div id="splash" class="splash" aria-hidden="true">
+    <div class="splash-inner">
+        <svg class="splash-logo"><use href="#logo-mark"/></svg>
+        <div class="splash-word"><span>PATRICK</span><span>HUNTER</span></div>
+        <div class="splash-bar"><i></i></div>
+    </div>
+</div>
+
+<div class="bg-grid" aria-hidden="true"></div>
+<div class="bg-glow" aria-hidden="true"></div>
 
 <div class="app">
 
-    <!-- SIDEBAR -->
-
+    <!-- ================= SIDEBAR ================= -->
     <aside class="sidebar">
 
-        <div class="logo">
-            <div class="logo-icon">PH</div>
-
-            <div>
-                <strong>Patrick Hunter</strong>
-                <span>Admin Panel</span>
+        <a class="logo" href="/admin" aria-label="Patrick Hunter">
+            <svg class="logo-icon"><use href="#logo-mark"/></svg>
+            <div class="logo-text">
+                <strong>PATRICK<em>HUNTER</em></strong>
+                <span>Admin Console</span>
             </div>
-        </div>
+        </a>
 
         <nav>
+            <i class="nav-indicator" aria-hidden="true"></i>
 
-            <button
-                class="nav-item active"
-                data-section="dashboard"
-            >
-                📊
-                <span>Дашборд</span>
+            <button class="nav-item active" data-section="dashboard">
+                <svg class="ico"><use href="#i-dashboard"/></svg><span>Дашборд</span>
             </button>
-
-            <button
-                class="nav-item"
-                data-section="accounts"
-            >
-                👤
-                <span>Аккаунты</span>
+            <button class="nav-item" data-section="accounts">
+                <svg class="ico"><use href="#i-users"/></svg><span>Аккаунты</span>
             </button>
-
-            <button
-                class="nav-item"
-                data-section="activity"
-            >
-                ⚡
-                <span>Активность</span>
+            <button class="nav-item" data-section="activity">
+                <svg class="ico"><use href="#i-bolt"/></svg><span>Активность</span>
             </button>
-
-            <button
-                class="nav-item"
-                data-section="logs"
-            >
-                📋
-                <span>Логи</span>
+            <button class="nav-item" data-section="logs">
+                <svg class="ico"><use href="#i-list"/></svg><span>Логи</span>
             </button>
-
-            <button
-                class="nav-item"
-                data-section="control"
-            >
-                🕹
-                <span>Управление</span>
+            <button class="nav-item" data-section="control">
+                <svg class="ico"><use href="#i-sliders"/></svg><span>Управление</span>
             </button>
-
-            <button
-                class="nav-item"
-                data-section="resources"
-            >
-                📈
-                <span>Ресурсы</span>
+            <button class="nav-item" data-section="resources">
+                <svg class="ico"><use href="#i-chip"/></svg><span>Ресурсы</span>
             </button>
-
-            <button
-                class="nav-item"
-                data-section="learning"
-            >
-                🎓
-                <span>Обучение</span>
+            <button class="nav-item" data-section="learning">
+                <svg class="ico"><use href="#i-book"/></svg><span>Обучение</span>
             </button>
-
-            <button
-                class="nav-item"
-                data-section="withdraw"
-            >
-                💸
-                <span>Выводы</span>
+            <button class="nav-item" data-section="withdraw">
+                <svg class="ico"><use href="#i-out"/></svg><span>Выводы</span>
             </button>
-
-            <button
-                class="nav-item"
-                data-section="session"
-            >
-                🔑
-                <span>Сессия</span>
+            <button class="nav-item" data-section="session">
+                <svg class="ico"><use href="#i-key"/></svg><span>Сессия</span>
             </button>
-
         </nav>
 
         <div class="sidebar-bottom">
-
             <div class="connection">
                 <span class="status-dot"></span>
                 <span>Supabase подключён</span>
             </div>
-
+            <div class="sidebar-clock" id="clock">--:--:--</div>
         </div>
 
     </aside>
 
 
-    <!-- MAIN -->
-
+    <!-- ================= MAIN ================= -->
     <main class="main">
 
-        <!-- HEADER -->
-
         <header class="header">
-
-            <div>
-
-                <h1 id="page-title">
-                    Дашборд
-                </h1>
-
-                <p id="page-subtitle">
-                    Статистика Patrick Hunter
-                </p>
-
+            <div class="header-title">
+                <div class="crumb"><span>PH</span><i>/</i><span id="crumb">dashboard</span></div>
+                <h1 id="page-title">Дашборд</h1>
+                <p id="page-subtitle">Статистика Patrick Hunter</p>
             </div>
 
             <div class="header-actions">
+                <span id="last-update" class="last-update">Загрузка...</span>
 
-                <button
-                    id="refresh-btn"
-                    class="refresh-btn"
-                >
-                    ↻ Обновить
+                <button id="theme-btn" class="icon-btn" title="Тема: тёмная / светлая" aria-label="Сменить тему">
+                    <svg class="ico ico-moon"><use href="#i-moon"/></svg>
+                    <svg class="ico ico-sun"><use href="#i-sun"/></svg>
                 </button>
 
-                <span
-                    id="last-update"
-                    class="last-update"
-                >
-                    Загрузка...
-                </span>
-
+                <button id="refresh-btn" class="refresh-btn">
+                    <svg class="ico"><use href="#i-refresh"/></svg>
+                    <span>Обновить</span>
+                </button>
             </div>
-
         </header>
+
+        <!-- Бегущая лента событий -->
+        <div class="ticker hidden" id="ticker" aria-hidden="true">
+            <div class="ticker-label"><i></i>LIVE</div>
+            <div class="ticker-viewport"><div class="ticker-track" id="ticker-track"></div></div>
+        </div>
 
 
         <!-- LOADING -->
-
-        <div
-            id="loading"
-            class="loading"
-        >
+        <div id="loading" class="loading">
             <div class="spinner"></div>
             <span>Загрузка статистики...</span>
         </div>
 
-
         <!-- ERROR -->
-
-        <div
-            id="error"
-            class="error hidden"
-        >
+        <div id="error" class="error hidden">
+            <svg class="ico"><use href="#i-alert"/></svg>
             <strong>Ошибка</strong>
-
             <span id="error-message"></span>
-
-            <button
-                onclick="loadDashboard()"
-            >
-                Повторить
-            </button>
+            <button onclick="loadDashboard()">Повторить</button>
         </div>
 
 
         <!-- CONTENT -->
-
-        <div
-            id="content"
-            class="content hidden"
-        >
-
+        <div id="content" class="content hidden">
 
             <!-- ========================================= -->
             <!-- DASHBOARD -->
             <!-- ========================================= -->
 
-            <section
-                id="section-dashboard"
-                class="section active"
-            >
+            <section id="section-dashboard" class="section active">
 
-                <!-- KPI -->
+                <!-- HERO -->
+                <div class="hero">
 
-                <div class="stats-grid">
-
-                    <div class="stat-card">
-
-                        <div class="stat-icon purple">
-                            ⭐
+                    <div class="panel hero-main spot">
+                        <div class="eyebrow"><svg class="ico"><use href="#i-star"/></svg>Всего Stars</div>
+                        <strong id="total-stars" class="hero-value">0</strong>
+                        <div class="hero-meta">
+                            <span class="chip" id="hero-chip-avg">—</span>
+                            <span class="chip" id="hero-chip-best">—</span>
+                            <span class="chip" id="hero-chip-days">—</span>
                         </div>
-
-                        <div>
-                            <span class="stat-label">
-                                Всего Stars
-                            </span>
-
-                            <strong
-                                id="total-stars"
-                                class="stat-value"
-                            >
-                                0
-                            </strong>
+                        <div class="hero-chart-head">
+                            <span>Накопленные Stars</span>
+                            <div class="range" id="hero-range">
+                                <button data-r="14">14Д</button>
+                                <button data-r="30">30Д</button>
+                                <button data-r="90" class="active">90Д</button>
+                            </div>
                         </div>
-
+                        <div id="hero-chart" class="chart-box hero-chart"></div>
                     </div>
 
-
-                    <div class="stat-card">
-
-                        <div class="stat-icon blue">
-                            🖱️
+                    <div class="hero-side">
+                        <div class="stat-card spot">
+                            <div class="stat-top"><span class="stat-label">Заработано по событиям</span><svg class="ico"><use href="#i-wallet"/></svg></div>
+                            <strong id="event-earnings" class="stat-value">0 ★</strong>
+                            <div class="spark" data-spark="stars"></div>
                         </div>
 
-                        <div>
-                            <span class="stat-label">
-                                Кликов
-                            </span>
-
-                            <strong
-                                id="total-clicks"
-                                class="stat-value"
-                            >
-                                0
-                            </strong>
+                        <div class="stat-card spot">
+                            <div class="stat-top"><span class="stat-label">Реальный баланс</span><svg class="ico"><use href="#i-star"/></svg></div>
+                            <strong id="real-balance" class="stat-value">0 ★</strong>
+                            <div class="spark" data-spark="balance"></div>
                         </div>
 
-                    </div>
-
-
-                    <div class="stat-card">
-
-                        <div class="stat-icon green">
-                            ✅
+                        <div class="stat-card spot">
+                            <div class="stat-top"><span class="stat-label">Изменение баланса за сегодня</span><svg class="ico"><use href="#i-trend"/></svg></div>
+                            <strong id="balance-delta" class="stat-value">0 ★</strong>
+                            <div class="delta-bar"><i id="delta-fill"></i></div>
                         </div>
-
-                        <div>
-                            <span class="stat-label">
-                                Заданий
-                            </span>
-
-                            <strong
-                                id="total-tasks"
-                                class="stat-value"
-                            >
-                                0
-                            </strong>
-                        </div>
-
-                    </div>
-
-
-                    <div class="stat-card">
-
-                        <div class="stat-icon orange">
-                            🎁
-                        </div>
-
-                        <div>
-                            <span class="stat-label">
-                                Daily Bonus
-                            </span>
-
-                            <strong
-                                id="total-daily"
-                                class="stat-value"
-                            >
-                                0
-                            </strong>
-                        </div>
-
-                    </div>
-
-
-                    <div class="stat-card">
-
-                        <div class="stat-icon pink">
-                            🎟️
-                        </div>
-
-                        <div>
-                            <span class="stat-label">
-                                Промокодов найдено
-                            </span>
-
-                            <strong
-                                id="total-promos-found"
-                                class="stat-value"
-                            >
-                                0
-                            </strong>
-                        </div>
-
-                    </div>
-
-
-                    <div class="stat-card">
-
-                        <div class="stat-icon cyan">
-                            🚀
-                        </div>
-
-                        <div>
-                            <span class="stat-label">
-                                Промокодов активировано
-                            </span>
-
-                            <strong
-                                id="total-promos-activated"
-                                class="stat-value"
-                            >
-                                0
-                            </strong>
-                        </div>
-
                     </div>
 
                 </div>
 
 
-                <!-- BALANCE -->
+                <!-- KPI -->
+                <div class="stats-grid">
 
-                <div class="stats-grid balance-grid">
-
-                    <div class="stat-card">
-
-                        <div class="stat-icon purple">
-                            💰
-                        </div>
-
-                        <div>
-                            <span class="stat-label">
-                                Заработано по событиям
-                            </span>
-
-                            <strong
-                                id="event-earnings"
-                                class="stat-value"
-                            >
-                                0 ⭐
-                            </strong>
-                        </div>
-
+                    <div class="stat-card spot">
+                        <div class="stat-top"><span class="stat-label">Кликов</span><svg class="ico"><use href="#i-cursor"/></svg></div>
+                        <strong id="total-clicks" class="stat-value">0</strong>
+                        <div class="spark" data-spark="clicks"></div>
                     </div>
 
-
-                    <div class="stat-card">
-
-                        <div class="stat-icon green">
-                            💳
-                        </div>
-
-                        <div>
-                            <span class="stat-label">
-                                Реальный баланс
-                            </span>
-
-                            <strong
-                                id="real-balance"
-                                class="stat-value"
-                            >
-                                0 ⭐
-                            </strong>
-                        </div>
-
+                    <div class="stat-card spot">
+                        <div class="stat-top"><span class="stat-label">Заданий</span><svg class="ico"><use href="#i-check"/></svg></div>
+                        <strong id="total-tasks" class="stat-value">0</strong>
+                        <div class="spark" data-spark="tasks"></div>
                     </div>
 
+                    <div class="stat-card spot">
+                        <div class="stat-top"><span class="stat-label">Daily Bonus</span><svg class="ico"><use href="#i-gift"/></svg></div>
+                        <strong id="total-daily" class="stat-value">0</strong>
+                        <div class="spark" data-spark="daily"></div>
+                    </div>
 
-                    <div class="stat-card">
+                    <div class="stat-card spot">
+                        <div class="stat-top"><span class="stat-label">Промокодов найдено</span><svg class="ico"><use href="#i-ticket"/></svg></div>
+                        <strong id="total-promos-found" class="stat-value">0</strong>
+                        <div class="spark" data-spark="promos_found"></div>
+                    </div>
 
-                        <div class="stat-icon blue">
-                            📈
-                        </div>
-
-                        <div>
-                            <span class="stat-label">
-                                Изменение баланса за сегодня
-                            </span>
-
-                            <strong
-                                id="balance-delta"
-                                class="stat-value"
-                            >
-                                0 ⭐
-                            </strong>
-                        </div>
-
+                    <div class="stat-card spot">
+                        <div class="stat-top"><span class="stat-label">Промокодов активировано</span><svg class="ico"><use href="#i-rocket"/></svg></div>
+                        <strong id="total-promos-activated" class="stat-value">0</strong>
+                        <div class="ratio"><div class="ratio-bar"><i id="promo-ratio-fill"></i></div><span id="promo-ratio-text">—</span></div>
                     </div>
 
                 </div>
 
 
                 <!-- CHARTS -->
-
                 <div class="charts-grid">
 
-                    <div class="panel large">
-
+                    <div class="panel large spot">
                         <div class="panel-header">
-
                             <div>
-                                <h2>
-                                    Активность
-                                </h2>
-
-                                <span>
-                                    Динамика по дням
-                                </span>
+                                <h2>Активность</h2>
+                                <span>Динамика по дням</span>
                             </div>
-
+                            <div class="legend" id="activity-legend"></div>
                         </div>
-
-                        <div class="chart-container">
-
-                            <canvas
-                                id="activity-chart"
-                            ></canvas>
-
-                        </div>
-
+                        <div id="activity-chart" class="chart-box activity-chart"></div>
                     </div>
 
-
-                    <div class="panel">
-
+                    <div class="panel spot">
                         <div class="panel-header">
-
                             <div>
-                                <h2>
-                                    Stars
-                                </h2>
-
-                                <span>
-                                    Источники дохода
-                                </span>
+                                <h2>Stars</h2>
+                                <span>Источники дохода</span>
                             </div>
-
                         </div>
-
-                        <div class="chart-container">
-
-                            <canvas
-                                id="stars-chart"
-                            ></canvas>
-
-                        </div>
-
+                        <div id="stars-chart" class="donut-box"></div>
                     </div>
 
                 </div>
 
 
-                <!-- QUICK INFO -->
+                <!-- HEATMAP -->
+                <div class="panel spot">
+                    <div class="panel-header">
+                        <div>
+                            <h2>Календарь активности</h2>
+                            <span id="heat-sub">Все действия по дням</span>
+                        </div>
+                        <div class="heat-scale"><span>меньше</span><i class="h0"></i><i class="h1"></i><i class="h2"></i><i class="h3"></i><i class="h4"></i><span>больше</span></div>
+                    </div>
+                    <div id="heatmap" class="heatmap"></div>
+                </div>
 
+
+                <!-- QUICK INFO -->
                 <div class="two-columns">
 
-                    <div class="panel">
-
+                    <div class="panel spot">
                         <div class="panel-header">
-
                             <div>
-                                <h2>
-                                    Аккаунты
-                                </h2>
-
-                                <span>
-                                    Состояние Telegram аккаунтов
-                                </span>
+                                <h2>Аккаунты</h2>
+                                <span>Состояние Telegram аккаунтов</span>
                             </div>
-
                         </div>
-
-                        <div
-                            id="accounts-preview"
-                            class="account-list"
-                        ></div>
-
+                        <div id="accounts-preview" class="account-list"></div>
                     </div>
 
-
-                    <div class="panel">
-
+                    <div class="panel spot">
                         <div class="panel-header">
-
                             <div>
-                                <h2>
-                                    Последние события
-                                </h2>
-
-                                <span>
-                                    Активность бота
-                                </span>
+                                <h2>Последние события</h2>
+                                <span>Активность бота</span>
                             </div>
-
                         </div>
-
-                        <div
-                            id="events-preview"
-                            class="event-list"
-                        ></div>
-
+                        <div id="events-preview" class="event-list"></div>
                     </div>
 
                 </div>
@@ -537,39 +342,21 @@
             <!-- ACCOUNTS -->
             <!-- ========================================= -->
 
-            <section
-                id="section-accounts"
-                class="section"
-            >
-
+            <section id="section-accounts" class="section">
                 <div class="panel">
-
                     <div class="panel-header">
-
                         <div>
-                            <h2>
-                                Telegram аккаунты
-                            </h2>
-
-                            <span>
-                                Текущий статус подключений и прокси
-                            </span>
+                            <h2>Telegram аккаунты</h2>
+                            <span>Текущий статус подключений и прокси</span>
                         </div>
-
-                        <button class="kn-btn kn-primary" id="proxy-check-all">
-                            Проверить все прокси
-                        </button>
-
+                        <button class="kn-btn kn-primary" id="proxy-check-all">Проверить все прокси</button>
                     </div>
 
                     <div id="proxy-status" class="kn-status"></div>
 
                     <div class="table-wrapper">
-
                         <table>
-
                             <thead>
-
                                 <tr>
                                     <th>Аккаунт</th>
                                     <th>Имя</th>
@@ -579,19 +366,11 @@
                                     <th>Последнее подключение</th>
                                     <th>Обновлён</th>
                                 </tr>
-
                             </thead>
-
-                            <tbody
-                                id="accounts-table"
-                            ></tbody>
-
+                            <tbody id="accounts-table"></tbody>
                         </table>
-
                     </div>
-
                 </div>
-
             </section>
 
 
@@ -599,180 +378,65 @@
             <!-- ACTIVITY -->
             <!-- ========================================= -->
 
-            <section
-                id="section-activity"
-                class="section"
-            >
+            <section id="section-activity" class="section">
 
-                <div class="stats-grid">
+                <div class="stats-grid four">
 
-                    <div class="stat-card">
-
-                        <div class="stat-icon blue">
-                            🖱️
-                        </div>
-
-                        <div>
-                            <span class="stat-label">
-                                Кликов
-                            </span>
-
-                            <strong
-                                id="activity-clicks"
-                                class="stat-value"
-                            >
-                                0
-                            </strong>
-                        </div>
-
+                    <div class="stat-card spot">
+                        <div class="stat-top"><span class="stat-label">Кликов</span><svg class="ico"><use href="#i-cursor"/></svg></div>
+                        <strong id="activity-clicks" class="stat-value">0</strong>
+                        <div class="spark" data-spark="clicks"></div>
                     </div>
 
-
-                    <div class="stat-card">
-
-                        <div class="stat-icon green">
-                            ✅
-                        </div>
-
-                        <div>
-                            <span class="stat-label">
-                                Заданий
-                            </span>
-
-                            <strong
-                                id="activity-tasks"
-                                class="stat-value"
-                            >
-                                0
-                            </strong>
-                        </div>
-
+                    <div class="stat-card spot">
+                        <div class="stat-top"><span class="stat-label">Заданий</span><svg class="ico"><use href="#i-check"/></svg></div>
+                        <strong id="activity-tasks" class="stat-value">0</strong>
+                        <div class="spark" data-spark="tasks"></div>
                     </div>
 
-
-                    <div class="stat-card">
-
-                        <div class="stat-icon cyan">
-                            📱
-                        </div>
-
-                        <div>
-                            <span class="stat-label">
-                                Mini Apps
-                            </span>
-
-                            <strong
-                                id="activity-mini-apps"
-                                class="stat-value"
-                            >
-                                0
-                            </strong>
-                        </div>
-
+                    <div class="stat-card spot">
+                        <div class="stat-top"><span class="stat-label">Mini Apps</span><svg class="ico"><use href="#i-app"/></svg></div>
+                        <strong id="activity-mini-apps" class="stat-value">0</strong>
+                        <div class="spark" data-spark="mini_apps"></div>
                     </div>
 
-
-                    <div class="stat-card">
-
-                        <div class="stat-icon orange">
-                            🎁
-                        </div>
-
-                        <div>
-                            <span class="stat-label">
-                                Daily Bonus
-                            </span>
-
-                            <strong
-                                id="activity-daily"
-                                class="stat-value"
-                            >
-                                0
-                            </strong>
-                        </div>
-
+                    <div class="stat-card spot">
+                        <div class="stat-top"><span class="stat-label">Daily Bonus</span><svg class="ico"><use href="#i-gift"/></svg></div>
+                        <strong id="activity-daily" class="stat-value">0</strong>
+                        <div class="spark" data-spark="daily"></div>
                     </div>
 
                 </div>
 
-
                 <div class="panel">
-
                     <div class="panel-header">
-
                         <div>
-                            <h2>
-                                Последние клики
-                            </h2>
-
-                            <span>
-                                Последние 200 событий
-                            </span>
+                            <h2>Последние клики</h2>
+                            <span>Последние 200 событий</span>
                         </div>
-
                     </div>
-
                     <div class="table-wrapper">
-
                         <table>
-
                             <thead>
-
-                                <tr>
-                                    <th>Аккаунт</th>
-                                    <th>Время</th>
-                                    <th>Stars</th>
-                                </tr>
-
+                                <tr><th>Аккаунт</th><th>Время</th><th>Stars</th></tr>
                             </thead>
-
-                            <tbody
-                                id="clicks-table"
-                            ></tbody>
-
+                            <tbody id="clicks-table"></tbody>
                         </table>
-
                     </div>
-
                 </div>
 
-
                 <div class="panel">
-
                     <div class="panel-header">
-
-                        <div>
-                            <h2>
-                                Выполненные задания
-                            </h2>
-
-                        </div>
-
+                        <div><h2>Выполненные задания</h2></div>
                     </div>
-
                     <div class="table-wrapper">
-
                         <table>
-
                             <thead>
-
-                                <tr>
-                                    <th>Аккаунт</th>
-                                    <th>Тип</th>
-                                    <th>Время</th>
-                                    <th>Stars</th>
-                                </tr>
-
+                                <tr><th>Аккаунт</th><th>Тип</th><th>Время</th><th>Stars</th></tr>
                             </thead>
-
-                            <tbody
-                                id="tasks-table"
-                            ></tbody>
-
+                            <tbody id="tasks-table"></tbody>
                         </table>
-
                     </div>
-
                 </div>
 
             </section>
@@ -782,34 +446,16 @@
             <!-- LOGS -->
             <!-- ========================================= -->
 
-            <section
-                id="section-logs"
-                class="section"
-            >
-
+            <section id="section-logs" class="section">
                 <div class="panel">
-
                     <div class="panel-header">
-
                         <div>
-                            <h2>
-                                Логи
-                            </h2>
-
-                            <span>
-                                Последние события приложения
-                            </span>
+                            <h2>Логи</h2>
+                            <span>Последние события приложения</span>
                         </div>
-
                     </div>
-
-                    <div
-                        id="logs-container"
-                        class="logs-container"
-                    ></div>
-
+                    <div id="logs-container" class="logs-container"></div>
                 </div>
-
             </section>
 
             <!-- ========================================= -->
@@ -842,7 +488,7 @@
                     <div id="wd-stats" class="res-cards"></div>
                     <div id="wd-running"></div>
                     <div id="wd-accs"></div>
-                    <h3 style="margin:22px 0 10px">История</h3>
+                    <h3 class="sub-h">История</h3>
                     <div class="kn-toolbar">
                         <button class="kn-chip active" data-wf="all">Все</button>
                         <button class="kn-chip" data-wf="success">Успешные</button>
@@ -887,7 +533,7 @@
                             <h2>Ресурсы</h2>
                             <span>Замер памяти и CPU и расчёт, сколько аккаунтов потянет сервис</span>
                         </div>
-                        <select id="res-hours" class="kn-search" style="flex:0 0 auto;min-width:0">
+                        <select id="res-hours" class="kn-search kn-select">
                             <option value="6">6 ч</option>
                             <option value="24" selected>24 ч</option>
                             <option value="72">72 ч</option>
@@ -896,14 +542,12 @@
                     <div id="res-status" class="kn-status"></div>
                     <div id="res-cards" class="res-cards"></div>
                     <div id="res-notes" class="res-notes"></div>
-                    <div class="res-chart"><canvas id="res-chart"></canvas></div>
+                    <div class="legend" id="res-legend"></div>
+                    <div id="res-chart" class="chart-box res-chart"></div>
                 </div>
             </section>
 
-            <section
-                id="section-learning"
-                class="section"
-            >
+            <section id="section-learning" class="section">
                 <div class="panel">
                     <div class="panel-header">
                         <div>
@@ -936,16 +580,9 @@
 
 </div>
 
+<div id="tip" class="tip" role="tooltip"></div>
 
-<!-- CHART.JS -->
-
-<script
-    src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"
-></script>
-
-
-<!-- ADMIN JS -->
-
+<!-- ADMIN JS (графики встроены, Chart.js больше не нужен) -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <script src="/admin.js"></script>
 
