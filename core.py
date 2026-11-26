@@ -23,7 +23,7 @@ from utils import (
     looks_like_sponsor_gate, human_delay, is_webapp_button, parse_tme_target,
     classify_task_alert,
 )
-from antiban import safe_call
+from antiban import safe_call, TooManyFloodWaitsError
 
 logger = logging.getLogger(__name__)
 
@@ -64,11 +64,30 @@ class BotCore:
         # Связка кликер <-> задания: кликер просит внеочередной цикл заданий
         # (tasks_wanted), а после цикла задания сообщают об этом (tasks_cycle_done).
         self.knowledge = None  # knowledge.Knowledge — «Обучение», ставится из account.py
+        self.protection = None  # protection.AccountProtection — единый слой защиты, ставится из account.py
         self.tasks_wanted = asyncio.Event()
         self.tasks_cycle_done = asyncio.Event()
 
         # Настоящий запуск мини-аппов (WebView + keepalive + обработчики).
         self.miniapp = MiniAppRunner(client, self, tg_logger, label)
+
+    # --- Единая точка для ВСЕХ действий в Telegram: общий КД, лимитер, FloodWait, отдача лока ---
+    async def api(self, coro_factory, *, action: str = "", max_retries: int = 3, kind: str = "write", high=None):
+        """safe_call с защитой аккаунта. Все модули ходят в Telegram через него (или через click_*)."""
+        return await safe_call(coro_factory, action=action, max_retries=max_retries,
+                               protection=self.protection, high=high, kind=kind)
+
+    async def delay(self, lo: float, hi: float, *, fast: bool = False):
+        """Человеческая пауза, масштабированная прогревом/ультра-режимом/восстановлением.
+        Если ожидание долгое и лок бота у нас — лок на это время отдаётся (промокод не ждёт)."""
+        if self.protection is not None:
+            await self.protection.delay(lo, hi, fast=fast)
+        else:
+            await human_delay(lo, hi)
+
+    async def click_raw(self, btn):
+        """Нажать inline-кнопку через защиту; исключения НЕ глотаются (кроме учёта FloodWait)."""
+        return await self.api(lambda: btn.click(), action="click")
 
     # --- Очередь свежих сообщений от бота ---
     def _drain_queue(self):
@@ -105,7 +124,9 @@ class BotCore:
         (тогда нужно идти по обычному пути — ждать новое/отредактированное
         сообщение через wait_fresh, как раньше)."""
         try:
-            answer = await btn.click()
+            answer = await self.click_raw(btn)
+        except TooManyFloodWaitsError:
+            raise   # FloodWait/КД аккаунта: решает вызывающий цикл (перенос на конец КД), а не «клик не вышел»
         except Exception as e:
             logger.warning(f"⚠️ [{self.label}] Ошибка клика: {e}")
             return None, None
@@ -175,7 +196,9 @@ class BotCore:
         """Один быстрый запрос истории: самое свежее подходящее сообщение
         бота новее `floor`, либо None."""
         try:
-            async for msg in self.client.iter_messages(TARGET_BOT, limit=5):
+            msgs = await self.api(lambda: self.client.get_messages(TARGET_BOT, limit=5),
+                                  action="read_poll", kind="read", max_retries=2)
+            for msg in msgs:
                 if msg.out:
                     continue
                 effective_date = msg.edit_date or msg.date
@@ -183,6 +206,8 @@ class BotCore:
                     return None  # дальше только старее
                 if (msg.text or msg.buttons) and (predicate is None or predicate(msg)):
                     return msg
+        except TooManyFloodWaitsError:
+            raise
         except Exception as e:
             logger.warning(f"⚠️ [{self.label}] poll_once ошибка: {e}")
         return None
@@ -191,7 +216,9 @@ class BotCore:
         """Медленный фолбэк опросом истории чата — на случай пропуска события."""
         for _ in range(attempts):
             now = utcnow()
-            async for msg in self.client.iter_messages(TARGET_BOT, limit=8):
+            msgs = await self.api(lambda: self.client.get_messages(TARGET_BOT, limit=8),
+                                  action="read_poll", kind="read", max_retries=2)
+            for msg in msgs:
                 if msg.out:
                     continue
                 effective_date = msg.edit_date or msg.date
@@ -199,7 +226,9 @@ class BotCore:
                 if age < max_age and (msg.text or msg.buttons):
                     return msg
             await asyncio.sleep(1.5)
-        async for msg in self.client.iter_messages(TARGET_BOT, limit=5):
+        msgs = await self.api(lambda: self.client.get_messages(TARGET_BOT, limit=5),
+                              action="read_poll", kind="read", max_retries=2)
+        for msg in msgs:
             if not msg.out:
                 return msg
         return None
@@ -208,18 +237,23 @@ class BotCore:
         """Человеческая пауза ВНУТРИ удерживаемого bot_lock, во время которой
         лок отдаётся (промокод может пройти), а потом берётся обратно.
         Вызывать только из кода, уже держащего bot_lock."""
-        await self.bot_lock.yield_for(random.uniform(min_sec, max_sec))
+        pace = self.protection.pace_factor() if self.protection is not None else 1.0
+        if self.protection is not None:
+            self.protection.progress()
+        await self.bot_lock.yield_for(random.uniform(min_sec, max_sec) * pace)
 
     # --- Архивирование и join ---
     async def archive_chat(self, entity):
         try:
             peer = await self.client.get_input_entity(entity)
-            await safe_call(
+            await self.api(
                 lambda: self.client(EditPeerFoldersRequest(
                     folder_peers=[InputFolderPeer(peer=peer, folder_id=1)]
                 )),
                 action="archive_chat",
             )
+        except TooManyFloodWaitsError:
+            logger.info(f"[{self.label}] архивирование {entity} пропущено (КД аккаунта)")
         except Exception as e:
             logger.warning(f"⚠️ [{self.label}] Не удалось архивировать {entity}: {e}")
 
@@ -227,15 +261,23 @@ class BotCore:
         """Вступить в канал/чат. Возвращает статус, а не молча глотает ошибки
         (раньше провал вступления всё равно логировался как «подписался»):
         'ok' | 'already' | 'request' (нужно одобрение) | 'expired' | 'invalid' |
-        'limit' (слишком много каналов) | 'error'."""
+        'limit' (слишком много каналов) | 'budget' (дневной лимит защиты) |
+        'flood' (FloodWait/КД аккаунта) | 'error'."""
         status = "ok"
+        if self.protection is not None and not self.protection.budget_try("join"):
+            logger.warning(f"⚠️ [{self.label}] Вступление {target}: дневной бюджет вступлений исчерпан")
+            return "budget"
         try:
             if target.startswith('+'):
-                await safe_call(lambda: self.client(ImportChatInviteRequest(target[1:])), action="join_invite")
+                await self.api(lambda: self.client(ImportChatInviteRequest(target[1:])), action="join_invite")
             else:
-                await safe_call(lambda: self.client(JoinChannelRequest(target)), action="join_channel")
+                await self.api(lambda: self.client(JoinChannelRequest(target)), action="join_channel")
         except UserAlreadyParticipantError:
             status = "already"
+            if self.protection is not None:
+                self.protection.budget_refund("join")
+        except TooManyFloodWaitsError:
+            status = "flood"
         except InviteRequestSentError:
             status = "request"
         except InviteHashExpiredError:
@@ -252,10 +294,10 @@ class BotCore:
             logger.warning(f"⚠️ [{self.label}] Вступление {target}: {status}")
         if status in ("ok", "already"):
             if status == "ok":
-                await human_delay(2, 4)
+                await self.delay(2, 4)
             await self.archive_chat(target)
             if status == "ok":
-                await human_delay(2, 4)
+                await self.delay(2, 4)
         return status
 
     async def start_bot(self, target: str, payload=None) -> bool:
@@ -264,9 +306,12 @@ class BotCore:
         трогаем: он уже запущен, а лишний /start сбивает диалог заданий."""
         if target.lower() == TARGET_BOT.lower():
             return True
+        if self.protection is not None and not self.protection.budget_try("start_bot"):
+            logger.warning(f"⚠️ [{self.label}] Запуск бота @{target}: дневной бюджет запусков исчерпан")
+            return False
         cmd = f"/start {payload}" if payload else "/start"
         try:
-            await safe_call(lambda: self.client.send_message(target, cmd), action="task_start_bot")
+            await self.api(lambda: self.client.send_message(target, cmd), action="task_start_bot")
             await self.archive_chat(target)
             return True
         except Exception as e:
@@ -277,6 +322,9 @@ class BotCore:
         """Открыть мини-апп по ссылке t.me/bot[/app]?startapp=... .
         Сначала — по-настоящему (WebView, см. miniapp.py); если не вышло —
         старый путь (StartBotRequest + пауза), чтобы не потерять задание."""
+        if self.protection is not None and not self.protection.budget_try("miniapp"):
+            logger.warning(f"⚠️ [{self.label}] Мини-апп: дневной бюджет открытий исчерпан")
+            return False
         if MINIAPP_REAL_OPEN:
             try:
                 res = await self.miniapp.run_link(url)
@@ -293,6 +341,9 @@ class BotCore:
 
     async def handle_webview_button(self, msg, btn) -> bool:
         """Кнопка web_view / simple_web_view прямо в сообщении бота."""
+        if self.protection is not None and not self.protection.budget_try("miniapp"):
+            logger.warning(f"⚠️ [{self.label}] Мини-апп: дневной бюджет открытий исчерпан")
+            return False
         try:
             return await self.miniapp.run_button(msg, btn) == "ok"
         except Exception as e:
@@ -306,7 +357,7 @@ class BotCore:
                 return False
             bot_username, start_param = match.group(1), match.group(2)
             bot = await self.client.get_entity(bot_username)
-            await safe_call(
+            await self.api(
                 lambda: self.client(StartBotRequest(bot=bot, peer=bot, start_param=start_param)),
                 action="startapp",
             )
@@ -360,7 +411,7 @@ class BotCore:
         if unsupported:
             summary += f", ссылок/мини-аппов без обработки {unsupported}"
 
-        await human_delay(4, 8)
+        await self.delay(4, 8)
         since = utcnow()
         alert, _ = await self.click_button(confirm_btn)
         verdict = classify_task_alert(alert) if alert else "unknown"
@@ -389,7 +440,7 @@ class BotCore:
         в promo.py/clicker.py, оба чинились именно этим."""
         self._drain_queue()  # всё, что в очереди сейчас, — устаревшее
         since = utcnow()
-        await safe_call(lambda: self.client.send_message(TARGET_BOT, '/start'), action="send_start")
+        await self.api(lambda: self.client.send_message(TARGET_BOT, '/start'), action="send_start")
         msg = await self.wait_fresh(since, timeout=10)
         if not msg:
             return None
