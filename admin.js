@@ -1054,7 +1054,7 @@ async function loadControl() {
             const dead = a.dead
                 ? `<div class="wd-warm dead">❌ Аккаунт остановлен: ${escapeHtml(a.dead)}. Нужна новая сессия (вкладка «Генерация сессии») — после замены TELEGRAM_SESSION_${a.account} на Render аккаунт запустится заново.</div>` : "";
             return `<div class="ctl-acc"><h3>${escapeHtml(a.label)} ${a.ready ? "" : (a.dead ? "" : "<i>(запускается…)</i>")}</h3>${dead}
-                <div class="ctl-jobs">${routePanel(a)}${warmupPanel(a)}</div>
+                <div class="ctl-jobs">${routePanel(a)}${warmupPanel(a)}${protectionPanel(a)}</div>
                 <div class="ctl-jobs" style="margin-top:10px">${jobs}</div>
                 <button class="kn-btn" data-probe="${a.account}" ${a.ready ? "" : "disabled"}
                     title="Нажимает минимальную сумму вывода только если бот гарантированно откажет">Проба вывода (безопасно)</button></div>`;
@@ -1126,23 +1126,71 @@ function routePanel(a) {
         </div></div>`;
 }
 
+function fmtSec(sec) {
+    sec = Math.max(0, Math.round(sec || 0));
+    if (sec >= 86400) return `${Math.floor(sec / 86400)} дн ${Math.floor((sec % 86400) / 3600)} ч`;
+    if (sec >= 3600) return `${Math.floor(sec / 3600)} ч ${Math.floor((sec % 3600) / 60)} мин`;
+    if (sec >= 60) return `${Math.floor(sec / 60)} мин`;
+    return `${sec} с`;
+}
+
+function protectionPanel(a) {
+    const p = a.protection;
+    if (!p) return "";
+    const icon = { ACTIVE: "🟢", COOLDOWN: "🔴", RECOVERING: "🟡", OFFLINE: "⚪", AUTH_ERROR: "❌" }[p.state] || "•";
+    let lines = [`${icon} <b>${escapeHtml(p.state_title)}</b>`];
+    if (p.cooldown_left > 0) lines.push(`КД ещё ${fmtSec(p.cooldown_left)}`);
+    if (p.recovering_left > 0) lines.push(`восстановление ещё ${fmtSec(p.recovering_left)}`);
+    if (p.penalty_left > 0) lines.push(`штрафной режим ещё ${fmtSec(p.penalty_left)}`);
+    if (p.peer_flood) lines.push("🚨 был PeerFlood — проверьте @SpamBot");
+    const budgets = Object.values(p.budgets || {}).map(b =>
+        `${escapeHtml(b.title)} ${b.used}/${b.cap === null ? "∞" : b.cap}`).join(" · ");
+    const fl = p.last_flood
+        ? `последний FloodWait: ${p.last_flood.sec} с на «${escapeHtml(String(p.last_flood.action))}»` : "FloodWait не было";
+    return `<div class="ctl-job">
+        <div class="ctl-job-head"><b>🛡 Защита аккаунта</b></div>
+        <div class="ctl-line">${lines.join(" · ")}</div>
+        <div class="ctl-line">FloodWait: ${p.floods_1h} за час, ${p.floods_24h} за сутки · ${fl}</div>
+        <div class="ctl-line">Нагрузка ${Math.round(p.load_factor * 100)}% · замедление ×${p.slowdown} · паузы ×${p.pace}</div>
+        <div class="ctl-line">Бюджеты на сегодня: ${budgets}</div>
+        <button class="kn-btn" data-pclear="${a.account}" ${(p.cooldown_left || p.recovering_left || p.penalty_left) ? "" : "disabled"}>Сбросить КД/штраф</button>
+    </div>`;
+}
+
 function warmupPanel(a) {
     const w = a.warmup || {};
+    const ultra = w.mode === "ultra";
     let head;
     if (w.enabled && w.active) {
         const till = w.ends_at ? ` · до ${escapeHtml(formatDate(w.ends_at))}` : "";
-        head = `<div class="wd-warm">🌱 Прогрев: день ${w.day} из ${w.days} · нагрузка ${Math.round(w.factor * 100)}% от обычной${till}</div>`;
+        if (ultra) {
+            const phase = w.phase === "lurk"
+                ? `затишье (ещё ${fmtSec(w.lurk_left_sec)}): аккаунт только читает канал`
+                : "рост по кривой";
+            const quiet = w.quiet ? ` · тихие часы ${escapeHtml(w.quiet)} (UTC${w.tz_offset >= 0 ? "+" : ""}${w.tz_offset})` : "";
+            head = `<div class="wd-warm">🧊 УЛЬТРА-прогрев: день ${w.day} из ${w.days} · ${phase} · нагрузка ${Math.round(w.factor * 100)}% · замедление ×${w.slowdown}${quiet}${till}</div>`;
+        } else {
+            head = `<div class="wd-warm">🌱 Прогрев: день ${w.day} из ${w.days} · нагрузка ${Math.round(w.factor * 100)}% от обычной${till}</div>`;
+        }
     } else if (w.enabled) {
         head = `<div class="wd-warm done">✅ Прогрев завершён (${w.days} дн.) — работает на полной нагрузке</div>`;
     } else {
         head = `<div class="ctl-line">Прогрев выключен — аккаунт работает на полной нагрузке.</div>`;
     }
+    const curMode = w.enabled && w.mode ? w.mode : "normal";
+    const curDays = w.enabled && w.days ? w.days : 5;
     return `<div class="ctl-job">
         <div class="ctl-job-head"><b>🌱 Прогрев</b></div>${head}
-        <div class="ctl-line">Нагрузка растёт с 20% до 100% за N дней: клики и задания реже, меньше заданий за цикл.
-            Промокоды и чеки ловятся как обычно. Применяется сразу, без перезапуска.</div>
+        <div class="ctl-line"><b>Обычный</b>: нагрузка растёт с 20% до 100% линейно (до 60 дн.).<br>
+            <b>Ультра</b> (хрупкие аккаунты, напр. Тайвань; до 90 дн.): первые дни только чтение канала, затем рост с 5% по кривой,
+            тихие часы, строгий прокси (без перехода на IP Render), малые дневные бюджеты вступлений/запусков. Цель — сохранить аккаунт.
+            Промокоды и чеки ловятся (в ультра — с дневным лимитом). Применяется сразу.</div>
         <div class="wd-mode">
-            <input class="wd-fid" type="number" min="1" max="60" value="${w.enabled && w.days ? w.days : 5}" id="wdays-${a.account}">
+            <select id="wmode-${a.account}" class="wd-fid">
+                <option value="normal" ${curMode === "normal" ? "selected" : ""}>Обычный</option>
+                <option value="ultra" ${curMode === "ultra" ? "selected" : ""}>Ультра</option>
+            </select>
+            <input class="wd-fid" type="number" min="1" max="90" value="${curDays}" id="wdays-${a.account}">
             <button class="kn-btn kn-primary" data-wstart="${a.account}">${w.enabled && w.active ? "Начать заново" : "Запустить прогрев"}</button>
             ${w.enabled ? `<button class="kn-btn" data-wstop="${a.account}">Выключить</button>` : ""}
         </div></div>`;
@@ -1182,9 +1230,20 @@ function bindControlPanels() {
     });
     document.querySelectorAll("#ctl-list [data-wstart]").forEach(b => b.onclick = () => {
         const days = Number($(`wdays-${b.dataset.wstart}`).value);
-        if (!(days >= 1 && days <= 60)) { $("ctl-status").textContent = "Дней прогрева: от 1 до 60"; return; }
+        const mode = $(`wmode-${b.dataset.wstart}`).value;
+        const cap = mode === "ultra" ? 90 : 60;
+        if (!(days >= 1 && days <= cap)) { $("ctl-status").textContent = `Дней прогрева: от 1 до ${cap}`; return; }
         b.disabled = true;
-        ctlAction(() => postJson("/api/admin/warmup", { account: Number(b.dataset.wstart), days }), `Прогрев запущен на ${days} дн.`);
+        ctlAction(async () => {
+            const r = await postJson("/api/admin/warmup", { account: Number(b.dataset.wstart), days, mode });
+            if (r && r.warning) alert(r.warning);
+            return r;
+        }, `${mode === "ultra" ? "УЛЬТРА-прогрев" : "Прогрев"} запущен на ${days} дн.`);
+    });
+    document.querySelectorAll("#ctl-list [data-pclear]").forEach(b => b.onclick = () => {
+        if (!confirm("Сбросить КД и режим восстановления? Делайте это, только если уверены, что ограничения у аккаунта нет.")) return;
+        b.disabled = true;
+        ctlAction(() => postJson(`/api/admin/protection/clear?account=${b.dataset.pclear}`), "КД и штраф сброшены");
     });
     document.querySelectorAll("#ctl-list [data-wstop]").forEach(b => b.onclick = () => {
         b.disabled = true;
