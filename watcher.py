@@ -43,6 +43,7 @@ class ChannelWatcher:
         self.channels = list(channels)
         self.on_post = on_post
         self.tg_logger = tg_logger
+        self.protection = None   # AccountProtection — ставится из account.py
         self._seen = BoundedSet(400)
         self._tasks = []
         self._entities = {}
@@ -90,11 +91,26 @@ class ChannelWatcher:
             logger.warning(f"[{self.label}] не удалось получить канал {channel}: {e}")
             return
         try:
-            await safe_call(lambda: self.client(JoinChannelRequest(entity)), action=f"join_watch:{channel}")
+            await safe_call(lambda: self.client(JoinChannelRequest(entity)), action=f"join_watch:{channel}",
+                            protection=self.protection, high=True)
         except UserAlreadyParticipantError:
             pass
         except Exception as e:
             logger.warning(f"[{self.label}] не удалось вступить в {channel}: {e}")
+
+    def _poll_scale(self) -> float:
+        """Опрос канала каждые ~3 с у каждого из 5 аккаунтов с одного IP — это ~100 запросов GetHistory в минуту.
+        Основной путь — события; опрос лишь страховка. Хрупкие аккаунты (ультра-прогрев) опрашивают реже
+        (их коды всё равно приходят от соседей через Hub), после FloodWait — тоже."""
+        p = self.protection
+        if p is None:
+            return 1.0
+        scale = 1.0
+        if p.sched is not None and p.sched.ultra_active:
+            scale *= 3.0
+        if p.cooldown_left() > 0 or p.recovering_left() > 0:
+            scale *= 2.0
+        return scale
 
     # ------------------------------------------------------------------
     @staticmethod
@@ -130,12 +146,14 @@ class ChannelWatcher:
                     await self._dispatch(m, silent=first and age > STARTUP_MAX_POST_AGE_SEC)
                 first = False
                 errors = 0
-                await asyncio.sleep(CHANNEL_POLL_INTERVAL_SEC * random.uniform(0.75, 1.25))
+                await asyncio.sleep(CHANNEL_POLL_INTERVAL_SEC * self._poll_scale() * random.uniform(0.75, 1.25))
             except asyncio.CancelledError:
                 raise
             except FloodWaitError as e:
                 wait = min(getattr(e, "seconds", 30), 300) + 1
                 logger.warning(f"[{self.label}] опрос {channel}: FloodWait {wait}с")
+                if self.protection is not None:
+                    self.protection.note_flood(f"read_watch:{channel}", wait)   # в «нагрев» аккаунта; сам опрос ждёт как раньше
                 await asyncio.sleep(wait)
             except Exception as e:
                 errors += 1
