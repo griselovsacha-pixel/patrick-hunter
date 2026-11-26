@@ -36,6 +36,7 @@ from utils import (
     find_button_by_data,
 )
 from core import utcnow
+from antiban import CooldownActiveError, OperationFrozen
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +90,9 @@ class TaskRunner:
         TASK_WAKE_MIN_GAP_SEC и не во время идущего цикла (защита от FloodWait)."""
         if self._running:
             return True  # уже идёт — кликеру достаточно дождаться его конца
+        prot = self.core.protection
+        if not force and prot is not None and prot.job_block_seconds("tasks") > 0:
+            return False  # затишье/тихие часы ультра-прогрева или КД аккаунта: по просьбе не будим
         if (not force and self._last_cycle_start
                 and time.monotonic() - self._last_cycle_start < TASK_WAKE_MIN_GAP_SEC):
             return False
@@ -139,26 +143,31 @@ class TaskRunner:
         await self.sched.set_data("tasks", data)
 
     def _cycle_limit(self) -> int:
-        """Прогрев: чем «моложе» аккаунт, тем меньше заданий за цикл."""
-        f = self.sched.warmup_factor() if self.sched else 1.0
-        return max(4, round(MAX_TASKS_PER_CYCLE * f))
+        """Прогрев/ультра-прогрев/восстановление после FloodWait: меньше заданий за цикл."""
+        prot = self.core.protection
+        f = prot.load_factor() if prot is not None else (self.sched.warmup_factor() if self.sched else 1.0)
+        floor = prot.min_cycle_tasks() if prot is not None else 4
+        return max(floor, round(MAX_TASKS_PER_CYCLE * f))
 
     async def _click_skip(self, msg) -> bool:
         btn = find_button(msg, ["пропустить"]) or find_button_by_data(msg, ("skip_task:",))
         if not btn:
             return False
         try:
-            await btn.click()
+            await self.core.click_raw(btn)
+        except CooldownActiveError:
+            raise
         except Exception as e:
             logger.warning(f"⚠️ [{self.label}] Клик Пропустить: {e}")
             return False
-        await human_delay(2, 3)
+        await self.core.delay(2, 3)
         return True
 
     async def _refetch(self, msg):
         """Актуальная версия сообщения (бот мог его отредактировать)."""
         try:
-            fresh = await self.client.get_messages(TARGET_BOT, ids=msg.id)
+            fresh = await self.core.api(lambda: self.client.get_messages(TARGET_BOT, ids=msg.id),
+                                        action="read_refetch", kind="read", max_retries=2)
             return fresh or msg
         except Exception:
             return msg
@@ -342,7 +351,9 @@ class TaskRunner:
         deadline = loop.time() + timeout
         same_msg = None
         while True:
-            async for m in self.client.iter_messages(TARGET_BOT, limit=6):
+            recent = await self.core.api(lambda: self.client.get_messages(TARGET_BOT, limit=6),
+                                         action="read_tasks", kind="read", max_retries=2)
+            for m in recent:
                 if m.out:
                     continue
                 eff = m.edit_date or m.date
@@ -367,19 +378,52 @@ class TaskRunner:
     # ------------------------------------------------------------------
     # Основной цикл
     # ------------------------------------------------------------------
+    async def _wait_allowed(self):
+        """Затишье/тихие часы ультра-прогрева и КД аккаунта: цикл заданий не стартует.
+        Ручной запуск из админки (force) прерывает ожидание."""
+        prot = self.core.protection
+        if prot is None:
+            return
+        while True:
+            wait = prot.job_block_seconds("tasks")
+            if wait <= 0:
+                return
+            await self.sched.set_next("tasks", wait)
+            if await self._sleep_or_wake(min(wait, 1800)):
+                return
+
     async def run_forever(self):
         # Не стартуем сразу после рестарта: по сохранённому расписанию (scheduler.py);
         # ручной запуск из админки (request_run force) прерывает это ожидание.
-        await self._sleep_or_wake(await self.sched.plan_initial("tasks", (300, 900)))
+        # start_offset (индекс аккаунта × TASK_START_STAGGER_SEC) раньше нигде не использовался —
+        # теперь разносит тяжёлые первые циклы аккаунтов.
+        first_delay = await self.sched.plan_initial("tasks", (300, 900))
+        await self._sleep_or_wake(first_delay + self.start_offset)
+        prot = self.core.protection
         while True:
+            await self._wait_allowed()
             sleep_for = None
             self.sched.begin("tasks")
             status, msg_ = "ok", ""
             try:
-                sleep_for = await self._run_cycle()
+                if prot is not None:
+                    sleep_for = await prot.run_op("tasks", self._run_cycle)
+                else:
+                    sleep_for = await self._run_cycle()
                 msg_ = self.last_summary or ""
             except asyncio.CancelledError:
                 raise
+            except CooldownActiveError as e:
+                # FloodWait/PeerFlood: цикл прерван, следующий — после КД (с разбросом)
+                sleep_for = e.remaining + random.uniform(60, 240)
+                status, msg_ = "cooldown", f"КД аккаунта: {int(e.remaining)}с"
+                await self.tg_logger.log(f"🛡 Цикл заданий прерван: КД аккаунта, следующий через {int(sleep_for // 60)} мин")
+            except OperationFrozen as e:
+                logger.error(f"[{self.label}] Цикл заданий завис: {e}")
+                self.profile_stats.add_error(f"tasks: завис")
+                await self.tg_logger.log("Цикл заданий завис и был прерван", error=str(e)[:120])
+                sleep_for = random.uniform(*TASK_STUCK_RETRY_RANGE)
+                status, msg_ = "error", str(e)[:200]
             except Exception as e:
                 logger.error(f"[{self.label}] Ошибка заданий: {e}")
                 self.profile_stats.add_error(f"tasks: {str(e)[:50]}")
@@ -391,7 +435,9 @@ class TaskRunner:
                 self._running = False
                 self.core.tasks_cycle_done.set()
 
-            sleep_for = (sleep_for or random_task_interval()) * self.sched.slowdown()   # прогрев: реже
+            # прогрев / ультра / восстановление после FloodWait: реже
+            slow = prot.slowdown() if prot is not None else self.sched.slowdown()
+            sleep_for = (sleep_for or random_task_interval()) * slow
             await self.sched.set_next("tasks", sleep_for)
             woke = await self._sleep_or_wake(sleep_for)
             if woke:
@@ -418,7 +464,7 @@ class TaskRunner:
                     f"Кнопка заданий не найдена\n🧾 {(msg.text or '')[:80]}\n🔘 {labels}", error="нет кнопки")
                 return random.uniform(*TASK_STUCK_RETRY_RANGE)
             since = utcnow()
-            await btn.click()
+            await self.core.click_raw(btn)
 
         counters = {"done": 0, "unverified": 0, "failed": 0, "skip": 0}
         prev_sig = None
@@ -461,6 +507,8 @@ class TaskRunner:
                 errors_in_row = 0
             except asyncio.CancelledError:
                 raise
+            except CooldownActiveError:
+                raise
             except Exception as e:
                 logger.error(f"[{self.label}] Ошибка на задании #{i + 1}: {e}")
                 self.profile_stats.add_error(f"tasks#{i + 1}: {str(e)[:40]}")
@@ -469,7 +517,7 @@ class TaskRunner:
                     stuck = True
                     reason_end = "серия ошибок"
                     break
-                await human_delay(3, 6)
+                await self.core.delay(3, 6)
                 continue
 
             if result == "all_done":
@@ -491,15 +539,15 @@ class TaskRunner:
                     await self.db.event("task", stars=stars, task_type="task")
                     if "мини-апп" in desc:
                         await self.db.event("mini_app", stars=0.0, task_type="mini_app")
-                await human_delay(4, 9)
+                await self.core.delay(4, 9)
             elif result == "unverified":
                 counters["unverified"] += 1
                 await self.tg_logger.log(f"❔ Задание отправлено, но бот не подтвердил\n📌 {desc}")
-                await human_delay(3, 6)
+                await self.core.delay(3, 6)
             elif result == "failed":
                 counters["failed"] += 1
                 await self.tg_logger.log(f"❌ Задание не засчитано\n📌 {desc}")
-                await human_delay(2, 4)
+                await self.core.delay(2, 4)
                 # Бот после «не выполнено» задание не меняет — раньше мы ещё ~14 с опрашивали историю
                 # (≈12 запросов) и только потом нажимали «Пропустить». Теперь пропускаем сразу.
                 if task_msg is not None and has_skip(task_msg):
@@ -511,11 +559,13 @@ class TaskRunner:
                                 since = utcnow()
                     except asyncio.CancelledError:
                         raise
+                    except CooldownActiveError:
+                        raise
                     except Exception as e:
                         logger.warning(f"[{self.label}] Быстрый пропуск: {e}")
             elif result == "skip":
                 counters["skip"] += 1
-                await human_delay(2, 4)
+                await self.core.delay(2, 4)
 
         self.profile_stats.tasks_completed_today += counters["done"]
         self.profile_stats.tasks_skipped_today += counters["skip"]
