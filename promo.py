@@ -27,7 +27,7 @@ from utils import (
     find_promo_in_text, extract_start_links, button_texts, find_button, human_delay,
     BoundedSet, parse_tme_target,
 )
-from antiban import safe_call, TooManyFloodWaitsError
+from antiban import TooManyFloodWaitsError
 from core import utcnow
 from checks import CHECK_WORDS
 
@@ -125,11 +125,18 @@ class PromoHunter:
         key = code.lower()
         if key in self.activated_promos or key in self.promo_in_progress:
             return
+        prot = self.core.protection
+        # дневной бюджет «горячих» активаций (в ультра-прогреве — малый; в обычном режиме без лимита)
+        if prot is not None and not prot.budget_try("hot", high=True):
+            await self.tg_logger.log(f"🛡 Промокод `{code}` пропущен: дневной лимит активаций защиты аккаунта исчерпан")
+            return
+        max_attempts = prot.promo_attempts(PROMO_MAX_ATTEMPTS) if prot is not None else PROMO_MAX_ATTEMPTS
+        retry_range = prot.promo_retry_range(PROMO_RETRY_DELAY_RANGE) if prot is not None else PROMO_RETRY_DELAY_RANGE
         self.promo_in_progress.add(key)
         await self.tg_logger.log(f"🚀 Активирую промокод: `{code}`")
         outcome = RETRY
         try:
-            for attempt in range(1, PROMO_MAX_ATTEMPTS + 1):
+            for attempt in range(1, max_attempts + 1):
                 try:
                     outcome = await asyncio.wait_for(self._attempt(code), PROMO_ATTEMPT_TIMEOUT_SEC)
                 except TooManyFloodWaitsError as e:
@@ -148,8 +155,8 @@ class PromoHunter:
                 if outcome != RETRY:
                     break
                 logger.warning(f"⚠️ [{self.label}] Промокод {code}: попытка #{attempt} неудачна")
-                if attempt < PROMO_MAX_ATTEMPTS:
-                    await human_delay(*PROMO_RETRY_DELAY_RANGE)
+                if attempt < max_attempts:
+                    await self.core.delay(*retry_range, fast=True)
 
             if outcome == OK:
                 self.activated_promos.add(key)
@@ -165,7 +172,7 @@ class PromoHunter:
             else:
                 self.profile_stats.add_error(f"промо {code}: все попытки неудачны")
                 await self.tg_logger.log(
-                    f"Промокод `{code}`: все {PROMO_MAX_ATTEMPTS} попыток неудачны", error="исчерпаны попытки")
+                    f"Промокод `{code}`: все {max_attempts} попыток неудачны", error="исчерпаны попытки")
                 if self.db:
                     await self.db.event("promo_failed", promo_code=code, error_reason="all attempts failed")
         finally:
@@ -199,7 +206,7 @@ class PromoHunter:
                 return RETRY
 
             since = utcnow()
-            await safe_call(lambda: self.client.send_message(TARGET_BOT, code), action="send_promo_code")
+            await core.api(lambda: self.client.send_message(TARGET_BOT, code), action="send_promo_code", high=True)
             resp = await core.wait_fresh(since, timeout=8, fallback=False)
             if not resp:
                 return RETRY
@@ -226,7 +233,7 @@ class PromoHunter:
                     if t and t["kind"] in ("channel", "invite"):
                         await self.core.safe_join(t["target"])
                 if any(w in b_text for w in ["подписал", "проверить", "готово", "я подписал", "check"]):
-                    await human_delay(2, 3)
+                    await self.core.delay(2, 3, fast=True)
                     await self.core.click_button(b)
 
     async def _post_success_refresh(self):
