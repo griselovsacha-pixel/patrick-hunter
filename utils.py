@@ -137,9 +137,48 @@ def solve_math(text: str):
         if op == '*': return a * b
         if op == '/' and b != 0: return a // b
     expression = re.sub(r'[^\d\+\-\*\/\(\)\s]', '', text)
+    return _safe_arith(expression)
+
+
+def _safe_arith(expression: str):
+    """Арифметика из текста бота БЕЗ eval: только + - * / и скобки над целыми. Раньше здесь был eval():
+    строка вида «9**9**9**9» (оператор * разрешён дважды подряд) вешала весь event loop —
+    то есть ВСЕ аккаунты процесса разом, а не один."""
+    import ast
+    expression = (expression or "").strip()
+    if not expression or len(expression) > 60:
+        return None
     try:
-        return int(eval(expression))
-    except Exception:
+        tree = ast.parse(expression, mode="eval")
+    except (SyntaxError, ValueError):
+        return None
+
+    def ev(n, depth=0):
+        if depth > 12:
+            raise ValueError("слишком глубоко")
+        if isinstance(n, ast.Expression):
+            return ev(n.body, depth + 1)
+        if isinstance(n, ast.Constant) and isinstance(n.value, int) and not isinstance(n.value, bool):
+            return n.value
+        if isinstance(n, ast.UnaryOp) and isinstance(n.op, (ast.UAdd, ast.USub)):
+            v = ev(n.operand, depth + 1)
+            return v if isinstance(n.op, ast.UAdd) else -v
+        if isinstance(n, ast.BinOp) and isinstance(n.op, (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv)):
+            a, b = ev(n.left, depth + 1), ev(n.right, depth + 1)
+            if isinstance(n.op, ast.Add):
+                return a + b
+            if isinstance(n.op, ast.Sub):
+                return a - b
+            if isinstance(n.op, ast.Mult):
+                return a * b
+            if b == 0:
+                raise ValueError("деление на ноль")
+            return a // b
+        raise ValueError("недопустимое выражение")   # в т.ч. ** и вызовы
+
+    try:
+        return int(ev(tree))
+    except (ValueError, OverflowError, RecursionError):
         return None
 
 
