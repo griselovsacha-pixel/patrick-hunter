@@ -9,9 +9,11 @@ DailyClaimer — сбор ежедневного бонуса.
 import asyncio
 import datetime
 import logging
+import random
 
 from utils import human_delay, parse_next_daily_seconds, looks_like_bio_link_popup, solve_math
 from core import utcnow
+from antiban import CooldownActiveError, OperationFrozen
 from knowledge import is_ad
 
 logger = logging.getLogger(__name__)
@@ -27,6 +29,7 @@ class DailyClaimer:
         self.label = label
         self.db = db
         self._wake = asyncio.Event()
+        self._woken_manually = False
         self.sched = None  # scheduler.JobScheduler, ставится из account.py
 
     async def collect_once(self) -> int:
@@ -37,7 +40,7 @@ class DailyClaimer:
 
             for attempt in range(3):
                 if attempt > 0:
-                    await asyncio.sleep(10)
+                    await self.core.delay(8, 13)
 
                 async with self.core.bot_lock.acquire():
                     msg = await self.core._open_unlocked()
@@ -50,7 +53,7 @@ class DailyClaimer:
                     for row in msg.buttons:
                         for btn in row:
                             if any(w in btn.text.lower() for w in ["профил", "profile"]):
-                                await btn.click()
+                                await self.core.click_raw(btn)
                                 profile_clicked = True
                                 break
                         if profile_clicked:
@@ -161,7 +164,7 @@ class DailyClaimer:
                             for btn in row:
                                 if btn.text.strip() == str(res):
                                     since2 = utcnow()
-                                    await btn.click()
+                                    await self.core.click_raw(btn)
                                     clicked_math = True
                                     break
                             if clicked_math:
@@ -178,6 +181,12 @@ class DailyClaimer:
             await self.tg_logger.log("Ежедневка: все 3 попытки провалились", error="3 попытки")
             return 3600
 
+        except CooldownActiveError as e:
+            wait = int(e.remaining + random.uniform(60, 240))
+            await self.tg_logger.log(f"🛡 Ежедневка отложена: КД аккаунта, повтор через {wait // 60} мин")
+            return wait
+        except OperationFrozen:
+            raise
         except Exception as e:
             logger.error(f"[{self.label}] Ошибка ежедневки: {e}")
             self.profile_stats.add_error(f"Ежедневка exception: {str(e)[:50]}")
@@ -251,23 +260,49 @@ class DailyClaimer:
         self._wake.set()
         return True
 
-    async def _sleep(self, sec: float):
-        await self.sched.set_next("daily", sec)
+    async def _sleep(self, sec: float, shown: float = None):
+        """Спим sec секунд; ручной запуск (админка) будит раньше. shown — что показывать как «следующий запуск»."""
+        await self.sched.set_next("daily", shown if shown is not None else sec)
+        self._woken_manually = False
         try:
             await asyncio.wait_for(self._wake.wait(), timeout=sec)
+            self._woken_manually = True
         except asyncio.TimeoutError:
             pass
         self._wake.clear()
 
+    async def _wait_allowed(self):
+        """Затишье/тихие часы ультра-прогрева и КД аккаунта: ежедневку не трогаем.
+        Ручной запуск из админки (request) прерывает ожидание."""
+        prot = self.core.protection
+        if prot is None:
+            return
+        while True:
+            wait = prot.job_block_seconds("daily")
+            if wait <= 0:
+                return
+            await self._sleep(min(wait, 1800), wait)
+            if self._woken_manually:
+                return
+
     async def run_forever(self):
         # Не стартуем сразу после рестарта: ждём по сохранённому расписанию (scheduler.py)
         await self._sleep(await self.sched.plan_initial("daily", (120, 420)))
+        prot = self.core.protection
         while True:
+            await self._wait_allowed()
             self.sched.begin("daily")
             wait_sec = 3600
             try:
-                wait_sec = await self.collect_once()
+                if prot is not None:
+                    wait_sec = await prot.run_op("daily", self.collect_once)
+                else:
+                    wait_sec = await self.collect_once()
                 await self.sched.end("daily", "ok", f"следующая попытка через {int(wait_sec // 60)} мин")
+            except OperationFrozen as e:
+                await self.sched.end("daily", "error", str(e)[:200])
+                await self.tg_logger.log("Ежедневка зависла и была прервана", error=str(e)[:120])
+                wait_sec = 1800
             except Exception as e:
                 await self.sched.end("daily", "error", str(e)[:200])
                 raise
