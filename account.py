@@ -7,6 +7,7 @@ Supabase. Общего состояния между аккаунтами нет
 пересылает «увидел код» соседям и ничего не блокирует).
 """
 import asyncio
+import os
 import random
 import time
 import datetime
@@ -44,6 +45,7 @@ from supabase_db import SupabaseStore
 from utils import find_button
 from knowledge import Knowledge
 from scheduler import JobScheduler
+from protection import AccountProtection
 from bot_crawler import Crawler
 from telethon import events
 
@@ -79,10 +81,22 @@ class PatrickAccount:
         self.number = int(digits or "1")
         # Прокси НЕ задаём здесь: маршрут (прокси / IP Render) выбирает ProxyManager перед
         # первым подключением — по настройкам из админки (см. start()).
+        # Отпечаток устройства. По умолчанию Telethon представляется как «Linux-контейнер» с одной и той же
+        # версией приложения у ВСЕХ аккаунтов — признак фермы. Можно задать для каждого аккаунта отдельно
+        # (ACCOUNT_<N>_DEVICE_MODEL / SYSTEM_VERSION / APP_VERSION / LANG_CODE). Значения должны быть
+        # СТАБИЛЬНЫМИ: менять их у живой сессии нельзя — смена устройства сама по себе подозрительна.
+        device_kw = {}
+        for env_key, kw in (("DEVICE_MODEL", "device_model"), ("SYSTEM_VERSION", "system_version"),
+                            ("APP_VERSION", "app_version"), ("LANG_CODE", "lang_code"),
+                            ("SYSTEM_LANG_CODE", "system_lang_code")):
+            val = (os.getenv(f"ACCOUNT_{self.number}_{env_key}") or "").strip()
+            if val:
+                device_kw[kw] = val
         self.client = TelegramClient(
             StringSession(session_string),
             API_ID,
             API_HASH,
+            **device_kw,
         )
 
         self.bot_lock = PriorityLock()
@@ -133,6 +147,13 @@ class PatrickAccount:
         self.sched.handlers["tasks"] = lambda: self.tasks.request_run("админка", force=True)
         self.sched.handlers["clicker"] = self.clicker.request
 
+        # Единый слой защиты аккаунта (Account Protection Manager): общий КД, лимитер, бюджеты, FloodWait,
+        # детектор зависаний. ВСЕ модули ходят в Telegram через него (core.api / core.click_raw / core.delay).
+        self.protection = AccountProtection(label, self.sched, self.bot_lock, self.tg_logger)
+        for _m in (self.core, self.bio_manager, self.watcher, self.tg_logger):
+            _m.protection = self.protection
+        self.captcha.core = self.core
+
         # Кликер просит внеочередной цикл заданий, когда бот пишет «выполни задание»
         self.clicker.on_gate = self.tasks.request_run
 
@@ -152,6 +173,7 @@ class PatrickAccount:
         # 1) БД и настройки аккаунта — ДО подключения: от них зависят режим прокси и прогрев
         await self.db.start()
         await self.sched.load()
+        await self.protection.load()   # КД/режим восстановления/бюджеты переживают рестарт
 
         # 2) не подключаемся, пока ту же сессию держит другой инстанс (старый деплой)
         await self.lease.acquire()
@@ -194,7 +216,12 @@ class PatrickAccount:
         except Exception as e:
             logger.warning("[%s] catch_up: %s", self.label, e)
 
-        await self.bio_manager.ensure_referral_bio()
+        if self.sched.lurking():
+            # ультра-прогрев, «затишье»: профиль не трогаем, бота не открываем — только читаем канал
+            logger.info("[%s] ультра-прогрев: затишье ещё %.1f дн. — био и баланс не трогаю", self.label,
+                        self.sched.lurk_remaining() / 86400)
+        else:
+            await self.bio_manager.ensure_referral_bio()
         # Баланс на старте не читаем (лишнее открытие бота при каждом рестарте): его обновят
         # ежедневка/задания, а здесь — один отложенный запрос с разбросом.
         self._background_tasks_delayed = asyncio.create_task(self._delayed_balance())
@@ -203,7 +230,10 @@ class PatrickAccount:
         await self.tg_logger.log(
             "🤖 Бот запущен!\n"
             f"🌐 Маршрут: {'прокси' if self.proxy.route == 'proxy' else 'IP Render'} (режим: {self.proxy.mode})\n"
-            + (f"🌱 Прогрев: день {wi['day']} из {wi['days']}, нагрузка {round(wi['factor'] * 100)}%\n" if wi["active"] else "")
+            + ((f"🧊 УЛЬТРА-прогрев: день {wi['day']} из {wi['days']}, фаза «{'затишье' if wi['phase'] == 'lurk' else 'рост'}», "
+                f"нагрузка {round(wi['factor'] * 100)}%, строгий прокси\n") if (wi["active"] and wi["mode"] == "ultra") else
+               (f"🌱 Прогрев: день {wi['day']} из {wi['days']}, нагрузка {round(wi['factor'] * 100)}%\n" if wi["active"] else ""))
+            + f"🛡 Защита аккаунта: {self.protection.snapshot()['state_title']}\n"
             + "📅 Ежедневка: по времени бота\n"
             f"📋 Задания: каждые ~{TASK_INTERVAL_MIN_SEC // 60}-{TASK_INTERVAL_MAX_SEC // 60} мин и по запросу кликера\n"
             "🔔 Промокоды и чеки: события + опрос канала каждые несколько секунд\n"
@@ -220,6 +250,7 @@ class PatrickAccount:
             asyncio.create_task(self._supervised("stats", self._stats_cycle)),
             asyncio.create_task(self._supervised("watchdog", self._watchdog)),
             asyncio.create_task(self._supervised("proxy", self.proxy.run_forever)),
+            asyncio.create_task(self._supervised("protection", self.protection.run_forever)),
         ]
         if self.crawler:
             self._background_tasks.append(
@@ -232,6 +263,7 @@ class PatrickAccount:
             return
         self.dead = reason
         self.ready = False
+        self.protection.set_auth_error(reason)
         logger.error("❌ [%s] аккаунт остановлен: %s", self.label, reason)
         try:
             await self.tg_logger.log(f"❌ Аккаунт остановлен: {reason}", error="нужна новая сессия или проверка аккаунта")
@@ -265,25 +297,38 @@ class PatrickAccount:
 
     async def _watchdog(self):
         """Сторож соединения. Если клиент отвалился и Telethon сам не поднял — поднимаем; если идём
-        через прокси и он, похоже, мёртв — переходим на IP Render. Раз в ~10 минут проверяем, что
-        аккаунт жив (бан/отзыв сессии иначе молча глотаются внутри циклов заданий)."""
+        через прокси и он, похоже, мёртв — переходим на IP Render (кроме СТРОГОГО режима ультра-прогрева).
+        Раньше сторож видел только флаг is_connected(): «подключён, но молчит» (зависший сокет) он не замечал,
+        а get_me() без таймаута мог повесить его самого. Теперь раз в ~5 минут — ping get_me() с таймаутом;
+        два провала подряд = принудительное переподключение. Раз в ~10 минут — проверка живости аккаунта
+        (бан/отзыв сессии иначе молча глотаются внутри циклов заданий)."""
         misses = 0
+        ping_fails = 0
         ticks = 0
         while True:
             await asyncio.sleep(30)
             ticks += 1
             if self.client.is_connected():
                 misses = 0
-                if ticks % 20 == 0:
+                self.protection.set_offline(False)
+                if ticks % 10 == 0:
                     try:
-                        await self.client.get_me()
+                        await asyncio.wait_for(self.client.get_me(), 30)
+                        ping_fails = 0
                     except FATAL_AUTH_ERRORS as e:
                         await self.fatal(f"{type(e).__name__} (проверка аккаунта)")
                         return
+                    except (asyncio.TimeoutError, ConnectionError, OSError) as e:
+                        ping_fails += 1
+                        logger.warning("[%s] ping get_me не ответил (%d/2): %r", self.label, ping_fails, e)
+                        if ping_fails >= 2:
+                            ping_fails = 0
+                            await self._force_reconnect("соединение «живое», но не отвечает")
                     except Exception as e:
                         logger.debug("[%s] проверка аккаунта: %s", self.label, e)
                 continue
             misses += 1
+            self.protection.set_offline(True)
             if misses >= 3:
                 logger.warning("[%s] нет соединения ~%dс, переподключаюсь", self.label, misses * 30)
                 try:
@@ -302,10 +347,29 @@ class PatrickAccount:
                 except Exception as e:
                     logger.warning("[%s] переподключение не удалось: %s", self.label, e)
 
+    async def _force_reconnect(self, why: str):
+        logger.warning("[%s] принудительное переподключение: %s", self.label, why)
+        try:
+            await asyncio.wait_for(self.client.disconnect(), 15)
+        except Exception as e:
+            logger.debug("[%s] disconnect: %r", self.label, e)
+        try:
+            await asyncio.wait_for(self.client.connect(), 30)
+            try:
+                await self.client.catch_up()
+            except Exception:
+                pass
+        except FATAL_AUTH_ERRORS as e:
+            await self.fatal(f"{type(e).__name__} при переподключении")
+        except Exception as e:
+            logger.warning("[%s] принудительное переподключение не удалось: %r", self.label, e)
+
     async def _delayed_balance(self):
         try:
             await asyncio.sleep(random.uniform(300, 600) + self.index * 180)
-            await self._refresh_real_balance()
+            if self.sched.block_seconds("daily") > 0 or self.protection.cooldown_left() > 0:
+                return   # затишье/тихие часы ультра-прогрева или КД аккаунта — баланс обновят позже задания
+            await self.protection.run_op("balance", self._refresh_real_balance, stall_sec=300)
         except asyncio.CancelledError:
             raise
         except Exception as e:
