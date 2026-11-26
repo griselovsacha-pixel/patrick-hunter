@@ -23,6 +23,7 @@ import time
 from collections import deque
 
 from core import utcnow
+from antiban import CooldownActiveError
 from knowledge import screen_fp, button_info, is_ad
 from utils import human_delay
 
@@ -112,6 +113,14 @@ class Crawler:
             except asyncio.TimeoutError:
                 pass
             self._wake.clear()
+            # Обход бота — десятки нажатий подряд: для аккаунта в ультра-прогреве или в КД/восстановлении
+            # после FloodWait это лишний риск заморозки. Откладываем (аккаунты без этих ограничений не затронуты).
+            prot = self.core.protection
+            if prot is not None and (self.sched.ultra_active or prot.state in ("COOLDOWN", "RECOVERING")):
+                delay = 6 * 3600
+                await self.sched.end("crawler", "ok", "отложен: ультра-прогрев / восстановление после FloodWait")
+                await self.sched.set_next("crawler", delay)
+                continue
             self.sched.begin("crawler")
             status, msg_ = "ok", ""
             try:
@@ -184,6 +193,9 @@ class Crawler:
                 msg, alert, err = await self._goto(path)
             except asyncio.CancelledError:
                 raise
+            except CooldownActiveError:
+                await self.tg_logger.log("🎓 Обход бота остановлен: КД аккаунта после FloodWait")
+                break
             except Exception as e:
                 logger.warning("[%s] crawler goto %s: %s", self.label, path, e)
                 continue
