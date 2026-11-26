@@ -39,7 +39,7 @@ from config import (
     PROMO_KEYWORDS, PROMO_REJECT_KEYWORDS,
 )
 from utils import BoundedSet, find_button, human_delay, parse_tme_target
-from antiban import safe_call, TooManyFloodWaitsError
+from antiban import TooManyFloodWaitsError
 from core import utcnow
 
 logger = logging.getLogger(__name__)
@@ -193,6 +193,13 @@ class CheckHunter:
             return
         if self.hub is not None and not self.hub.claim_check(self.label, key):
             return
+        prot = self.core.protection
+        if prot is not None and not prot.budget_try("hot", high=True):
+            # дневной лимит защиты исчерпан: отдаём чек другому аккаунту (если он есть)
+            logger.info("[%s] чек @%s: дневной лимит активаций защиты исчерпан", self.label, bot)
+            if self.hub is not None:
+                self.hub.finish_check(self.label, key, final=False)
+            return
         self.in_progress.add(key)
         task = asyncio.create_task(self.claim(bot, payload, time.monotonic()))
         self._tasks.add(task)
@@ -204,8 +211,10 @@ class CheckHunter:
         # логи уходят в очередь и не тормозят путь к боту (см. tg_logger.py)
         await self.tg_logger.log(f"🧾 Чек: забираю @{bot} `{payload[:40]}`")
         outcome, reply_text, extra = "retry", "", ""
+        prot = self.core.protection
+        max_attempts = prot.check_attempts(CHECK_MAX_ATTEMPTS) if prot is not None else CHECK_MAX_ATTEMPTS
         try:
-            for attempt in range(1, CHECK_MAX_ATTEMPTS + 1):
+            for attempt in range(1, max_attempts + 1):
                 try:
                     outcome, reply_text = await asyncio.wait_for(self._try_claim(bot, payload), 40)
                 except TooManyFloodWaitsError as e:
@@ -225,7 +234,7 @@ class CheckHunter:
                     outcome = "retry"
                 if outcome != "retry":
                     break
-                await human_delay(*CHECK_RETRY_DELAY)
+                await self.core.delay(*CHECK_RETRY_DELAY, fast=True)
 
             took = time.monotonic() - t0
             if outcome == "ok":
@@ -241,7 +250,7 @@ class CheckHunter:
                     f"📩 {reply_text[:300]}\n🔘 {self._last_buttons}")
             else:
                 await self.tg_logger.log(
-                    f"Чек @{bot}: не удалось за {CHECK_MAX_ATTEMPTS} попытки"
+                    f"Чек @{bot}: не удалось за {max_attempts} попытки"
                     f"{' — ' + extra if extra else ''}"
                     f"{' (передаю другому аккаунту)' if self.hub else ''}",
                     error="нет ответа")
@@ -285,7 +294,8 @@ class CheckHunter:
             except asyncio.TimeoutError:
                 m = None
                 try:
-                    for last in await self.client.get_messages(entity, limit=1):
+                    for last in await self.core.api(lambda: self.client.get_messages(entity, limit=1),
+                                                    action="read_check", kind="read", high=True, max_retries=2):
                         if not last.out:
                             m = last
                 except Exception as e:
@@ -304,9 +314,9 @@ class CheckHunter:
             q = stack.enter_context(self._subscribe(uid))  # подписка ДО запроса: ответ не потеряется
 
             since = utcnow()
-            await safe_call(
+            await self.core.api(
                 lambda: self.client(StartBotRequest(bot=entity, peer=entity, start_param=payload)),
-                action="start_check",
+                action="start_check", high=True,
             )
             reply = await self._wait(q, entity, since, CHECK_REPLY_TIMEOUT_SEC)
             if reply is None:
@@ -343,7 +353,7 @@ class CheckHunter:
             if btn is None:
                 break
             if fresh:
-                await human_delay(0.8, 1.5)  # Telegram должен учесть новое вступление
+                await self.core.delay(0.8, 1.5, fast=True)  # Telegram должен учесть новое вступление
 
             since = utcnow()
             alert, _ans = await self.core.click_button(btn)
