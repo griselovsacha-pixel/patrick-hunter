@@ -25,10 +25,42 @@ ACCOUNT_STAGGER = int(os.getenv("SCHED_ACCOUNT_STAGGER_SEC", "240"))
 
 # warmup / settings / lease — служебные записи: дата начала прогрева, настройки аккаунта из админки
 # (режим прокси, длительность прогрева), «аренда» сессии (защита от двух инстансов).
-JOBS = ("daily", "tasks", "clicker", "crawler", "warmup", "settings", "lease")
-HIDDEN_JOBS = ("warmup", "settings", "lease")
+JOBS = ("daily", "tasks", "clicker", "crawler", "warmup", "settings", "lease", "protection")
+HIDDEN_JOBS = ("warmup", "settings", "lease", "protection")
 WARMUP_MAX_DAYS = 60
 WARMUP_MIN_FACTOR = float(os.getenv("WARMUP_MIN_FACTOR", "0.2"))   # доля обычной нагрузки в первый день прогрева
+
+# ---------- УЛЬТРА-прогрев ----------
+# Для самых хрупких аккаунтов (виртуальные/азиатские номера, например Тайвань, свежие сессии, номера из
+# «серых» источников): они замораживаются за малейший всплеск. Цель режима — не заработок, а выживание.
+#   1) «Затишье» (lurk) — первые дни аккаунт только ЧИТАЕТ канал: ни заданий, ни кликов, ни ежедневки,
+#      ни правки профиля. Промо/чеки — только по малому дневному лимиту.
+#   2) Затем нагрузка растёт ПО КРИВОЙ (медленно в начале, быстрее к концу), а не линейно.
+#   3) Всё медленнее: интервалы ×(1 + 6·(1−f)), строгий лимитер, дневные бюджеты вступлений/запусков ботов.
+#   4) «Тихие часы» — ночью (по местному времени аккаунта) активности нет.
+#   5) Строгий прокси: аварийный переход на IP Render ЗАПРЕЩЁН (смена страны IP — главный триггер заморозки).
+WARMUP_MODES = ("normal", "ultra")
+ULTRA_MAX_DAYS = 90
+ULTRA_DEFAULT_DAYS = 30
+ULTRA_MIN_FACTOR = float(os.getenv("ULTRA_MIN_FACTOR", "0.05"))
+ULTRA_CURVE_POWER = float(os.getenv("ULTRA_CURVE_POWER", "1.7"))
+ULTRA_SLOWDOWN_K = float(os.getenv("ULTRA_SLOWDOWN_K", "6"))
+NORMAL_SLOWDOWN_K = 2.0
+LURK_BLOCKED_JOBS = ("tasks", "clicker", "daily", "crawler")
+
+
+def _parse_quiet(value: str):
+    try:
+        a, b = str(value).replace(" ", "").split("-", 1)
+        a, b = int(a) % 24, int(b) % 24
+        return (a, b) if a != b else None
+    except Exception:
+        return None
+
+
+# Тихие часы ультра-режима: «с-по» по местному времени аккаунта (ULTRA_QUIET_HOURS=1-8; пусто — выключено).
+ULTRA_QUIET = _parse_quiet(os.getenv("ULTRA_QUIET_HOURS", "1-8"))
+DEFAULT_TZ_OFFSET = int(os.getenv("TIMEZONE_OFFSET", "3"))
 
 
 def _now():
@@ -61,6 +93,7 @@ class JobScheduler:
             self._env_warmup_days = max(0, int(os.getenv(f"ACCOUNT_{self.number}_WARMUP_DAYS", "0") or 0))
         except ValueError:
             self._env_warmup_days = 0
+        self._env_warmup_mode = (os.getenv(f"ACCOUNT_{self.number}_WARMUP_MODE", "normal") or "normal").strip().lower()
 
     # ---------- БД ----------
     async def load(self):
@@ -115,62 +148,177 @@ class JobScheduler:
 
     # ---------- прогрев ----------
     @property
+    def warmup_mode(self) -> str:
+        """'normal' | 'ultra'. Из админки (БД), иначе ACCOUNT_<N>_WARMUP_MODE из env."""
+        m = (self.state["warmup"]["data"] or {}).get("mode") or self.setting("warmup_mode") or self._env_warmup_mode
+        return m if m in WARMUP_MODES else "normal"
+
+    @property
     def warmup_days(self) -> int:
         """Длительность прогрева в днях: из админки (БД), иначе из env. 0 — выключен."""
+        cap = ULTRA_MAX_DAYS if self.warmup_mode == "ultra" else WARMUP_MAX_DAYS
         v = self.setting("warmup_days")
         if v is not None:
             try:
-                return max(0, min(int(v), WARMUP_MAX_DAYS))
+                return max(0, min(int(v), cap))
             except (TypeError, ValueError):
                 pass
-        return self._env_warmup_days
+        return min(self._env_warmup_days, cap)
+
+    @property
+    def ultra(self) -> bool:
+        """Ультра-режим включён для аккаунта (даже если прогрев уже закончился)."""
+        return self.warmup_mode == "ultra" and self.warmup_days > 0
+
+    @property
+    def ultra_active(self) -> bool:
+        """Ультра-режим включён И прогрев ещё идёт — именно тогда действуют все ультра-ограничения."""
+        return self.ultra and self.warmup_factor() < 1.0
+
+    def _warmup_start(self):
+        return _parse((self.state["warmup"]["data"] or {}).get("start"))
+
+    def warmup_elapsed_days(self) -> float:
+        start = self._warmup_start()
+        return max((_now() - start).total_seconds() / 86400, 0.0) if start else 0.0
+
+    def lurk_days(self) -> float:
+        """Длительность «затишья» ультра-режима, дней (≈10% прогрева, но 2..5)."""
+        if not self.ultra:
+            return 0.0
+        d = (self.state["warmup"]["data"] or {}).get("lurk_days")
+        if d is not None:
+            try:
+                return max(0.0, min(float(d), self.warmup_days / 2))
+            except (TypeError, ValueError):
+                pass
+        return float(min(5, max(2, round(self.warmup_days * 0.1))))
+
+    def lurking(self) -> bool:
+        return self.ultra_active and self.warmup_elapsed_days() < self.lurk_days()
+
+    def lurk_remaining(self) -> float:
+        """Секунд до конца «затишья» (0 — не идёт)."""
+        if not self.lurking():
+            return 0.0
+        return max(0.0, (self.lurk_days() - self.warmup_elapsed_days()) * 86400)
+
+    def phase(self) -> str:
+        """off | lurk | ramp | done."""
+        if self.warmup_days <= 0:
+            return "off"
+        if self.warmup_factor() >= 1.0:
+            return "done"
+        return "lurk" if self.lurking() else "ramp"
+
+    def tz_offset(self) -> int:
+        """Часовой пояс аккаунта (для тихих часов): настройка из админки или общий TIMEZONE_OFFSET."""
+        v = self.setting("tz_offset")
+        try:
+            return int(v) if v is not None else DEFAULT_TZ_OFFSET
+        except (TypeError, ValueError):
+            return DEFAULT_TZ_OFFSET
+
+    def local_now(self) -> datetime.datetime:
+        return _now() + datetime.timedelta(hours=self.tz_offset())
+
+    def quiet_remaining(self) -> float:
+        """Секунд до конца тихих часов (0 — сейчас не тихие или не ультра)."""
+        if not (ULTRA_QUIET and self.ultra_active):
+            return 0.0
+        a, b = ULTRA_QUIET
+        now = self.local_now()
+        h = now.hour
+        inside = (a <= h < b) if a < b else (h >= a or h < b)
+        if not inside:
+            return 0.0
+        end = now.replace(hour=b, minute=0, second=0, microsecond=0)
+        if end <= now:
+            end += datetime.timedelta(days=1)
+        return (end - now).total_seconds() + random.uniform(60, 2400)   # просыпаемся не ровно в «8:00»
+
+    def block_seconds(self, job: str) -> float:
+        """Сколько секунд задаче `job` НЕЛЬЗЯ стартовать из-за ультра-режима (затишье / тихие часы)."""
+        if job not in LURK_BLOCKED_JOBS:
+            return 0.0
+        return max(self.lurk_remaining(), self.quiet_remaining())
 
     async def _warmup_boot(self):
         if self.warmup_days <= 0:
             return
         data = self.state["warmup"]["data"] or {}
         if not data.get("start"):
-            data = {"start": _now().isoformat(), "days": self.warmup_days}
+            data = {"start": _now().isoformat(), "days": self.warmup_days, "mode": self.warmup_mode}
             self.state["warmup"]["data"] = data
             await self._save("warmup")
-            logger.info("[%s] прогрев: старт, %d дн.", self.label, self.warmup_days)
+            logger.info("[%s] прогрев (%s): старт, %d дн.", self.label, self.warmup_mode, self.warmup_days)
 
-    async def start_warmup(self, days: int) -> bool:
+    async def start_warmup(self, days: int, mode: str = "normal") -> bool:
         """Из админки: включить прогрев на N дней, отсчёт — с этой минуты. days=0 — выключить.
+        mode: 'normal' (линейный, от 20%) | 'ultra' (затишье + медленная кривая, для хрупких аккаунтов).
         Нагрузка подхватывается на лету: задания — со следующего цикла, клики — со следующего слота."""
-        days = max(0, min(int(days), WARMUP_MAX_DAYS))
-        self.state["warmup"]["data"] = {"start": _now().isoformat(), "days": days} if days else {}
+        mode = mode if mode in WARMUP_MODES else "normal"
+        cap = ULTRA_MAX_DAYS if mode == "ultra" else WARMUP_MAX_DAYS
+        days = max(0, min(int(days), cap))
+        self.state["warmup"]["data"] = ({"start": _now().isoformat(), "days": days, "mode": mode} if days else {})
         await self._save("warmup")
-        ok = await self.set_settings(warmup_days=days)
-        logger.info("[%s] прогрев из админки: %s", self.label, f"{days} дн." if days else "выключен")
+        ok = await self.set_settings(warmup_days=days, warmup_mode=mode if days else None)
+        logger.info("[%s] прогрев из админки: %s", self.label,
+                    f"{mode}, {days} дн." if days else "выключен")
         return ok
 
     def warmup_factor(self) -> float:
         """Доля обычной нагрузки: 1.0 — полная (прогрев выключен или закончен)."""
         if self.warmup_days <= 0:
             return 1.0
-        start = _parse((self.state["warmup"]["data"] or {}).get("start"))
+        start = self._warmup_start()
+        ultra = self.warmup_mode == "ultra"
+        floor = ULTRA_MIN_FACTOR if ultra else WARMUP_MIN_FACTOR
         if not start:
-            return WARMUP_MIN_FACTOR
+            return floor
         days = (_now() - start).total_seconds() / 86400
         if days >= self.warmup_days:
             return 1.0
-        return WARMUP_MIN_FACTOR + (1.0 - WARMUP_MIN_FACTOR) * max(days, 0) / self.warmup_days
+        if not ultra:
+            return floor + (1.0 - floor) * max(days, 0) / self.warmup_days
+        lurk = min(5, max(2, round(self.warmup_days * 0.1)))
+        d = (self.state["warmup"]["data"] or {}).get("lurk_days")
+        try:
+            lurk = max(0.0, min(float(d), self.warmup_days / 2)) if d is not None else lurk
+        except (TypeError, ValueError):
+            pass
+        if days < lurk:
+            return floor
+        x = (days - lurk) / max(self.warmup_days - lurk, 0.001)
+        return floor + (1.0 - floor) * (min(max(x, 0.0), 1.0) ** ULTRA_CURVE_POWER)
+
+    def slowdown_for(self, f: float) -> float:
+        k = ULTRA_SLOWDOWN_K if self.ultra_active else NORMAL_SLOWDOWN_K
+        return 1.0 + k * (1.0 - f)
 
     def slowdown(self) -> float:
         """Во сколько раз реже запускать периодические задачи (1.0 — как обычно)."""
-        return 1.0 + 2.0 * (1.0 - self.warmup_factor())
+        return self.slowdown_for(self.warmup_factor())
 
     def warmup_info(self) -> dict:
         f = self.warmup_factor()
-        start = _parse((self.state["warmup"]["data"] or {}).get("start"))
+        start = self._warmup_start()
         day = int((_now() - start).total_seconds() // 86400) + 1 if start else 1
         ends = start + datetime.timedelta(days=self.warmup_days) if (start and self.warmup_days) else None
+        mode = self.warmup_mode
         return {"enabled": self.warmup_days > 0, "active": f < 1.0, "days": self.warmup_days,
                 "day": min(day, self.warmup_days) if self.warmup_days else 0,
                 "factor": round(f, 2), "start": start.isoformat() if start else None,
                 "ends_at": ends.isoformat() if ends else None,
-                "from_admin": self.setting("warmup_days") is not None}
+                "from_admin": self.setting("warmup_days") is not None,
+                "mode": mode if self.warmup_days > 0 else None,
+                "phase": self.phase(),
+                "lurk_days": self.lurk_days() if self.ultra else 0,
+                "lurk_left_sec": int(self.lurk_remaining()),
+                "quiet": f"{ULTRA_QUIET[0]:02d}-{ULTRA_QUIET[1]:02d}" if (ULTRA_QUIET and self.ultra) else None,
+                "quiet_left_sec": int(self.quiet_remaining()),
+                "slowdown": round(self.slowdown(), 2),
+                "tz_offset": self.tz_offset()}
 
     # ---------- план ----------
     async def plan_initial(self, job: str, first_range=(300, 900)) -> float:
@@ -189,8 +337,8 @@ class JobScheduler:
             delay = (st["next"] - now).total_seconds()
             why = "по сохранённому расписанию"
         if self.warmup_factor() < 1.0 and why != "по сохранённому расписанию":
-            delay *= 1.0 + 5.0 * (1.0 - self.warmup_factor())
-            why += ", прогрев — позже"
+            delay *= 1.0 + (15.0 if self.ultra_active else 5.0) * (1.0 - self.warmup_factor())
+            why += ", ультра-прогрев — позже" if self.ultra_active else ", прогрев — позже"
         logger.info("[%s] расписание %s: через %d с (%s)", self.label, job, delay, why)
         await self.set_next(job, delay)
         return delay
