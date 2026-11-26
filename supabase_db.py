@@ -353,6 +353,36 @@ class SupabaseStore:
         )
         return True
 
+    async def job_insert_new(self, job, data) -> bool:
+        """Создать строку job_schedule, ТОЛЬКО если её ещё нет (атомарно: ON CONFLICT DO NOTHING).
+        -> True, если строку создали мы. Нужно для аренды сессии: два инстанса не создадут её оба."""
+        if not self.enabled or not self.session:
+            return False
+        rows = await self._request(
+            "POST", "/rest/v1/job_schedule",
+            params={"on_conflict": "account_number,job"},
+            payload={"account_number": self._account_number(), "job": job, "last_status": "ok",
+                     "last_message": "", "data": data or {}},
+            extra_headers={"Prefer": "resolution=ignore-duplicates,return=representation"},
+        )
+        return bool(rows)
+
+    async def job_cas(self, job, expect_boot, expect_seq, data) -> bool:
+        """Условное обновление data строки job_schedule (compare-and-swap, одна атомарная операция в БД):
+        запись меняется, только если в ней всё ещё boot/seq такие, какими мы их прочитали.
+        -> True, если обновили; False — за это время строку изменил кто-то другой (гонка проиграна)."""
+        if not self.enabled or not self.session:
+            return False
+        params = {"account_number": f"eq.{self._account_number()}", "job": f"eq.{job}"}
+        params["data->>boot"] = f"eq.{expect_boot}" if expect_boot is not None else "is.null"
+        params["data->>seq"] = f"eq.{int(expect_seq)}" if expect_seq is not None else "is.null"
+        rows = await self._request(
+            "PATCH", "/rest/v1/job_schedule", params=params,
+            payload={"data": data or {}, "last_status": "ok", "last_message": ""},
+            extra_headers={"Prefer": "return=representation"},
+        )
+        return bool(rows)
+
     # ---------- автовывод (withdraw.py) ----------
     @staticmethod
     def _withdraw_payload(job):
