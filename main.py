@@ -6,6 +6,7 @@ import asyncio
 import logging
 import urllib.request
 import base64
+import hmac
 import json
 from pathlib import Path
 from datetime import datetime, timezone
@@ -225,9 +226,10 @@ def check_admin_auth(
             detail="Invalid authentication",
         )
 
-    if (
-        username != ADMIN_USER
-        or password != ADMIN_PASSWORD
+    # сравнение за постоянное время (раньше обычное != — подбор по времени ответа)
+    if not (
+        hmac.compare_digest(username.encode("utf-8"), str(ADMIN_USER).encode("utf-8"))
+        and hmac.compare_digest(password.encode("utf-8"), str(ADMIN_PASSWORD).encode("utf-8"))
     ):
         raise HTTPException(
             status_code=401,
@@ -716,7 +718,8 @@ async def admin_jobs(authorization: str | None = Header(default=None)):
         if not getattr(acc, "crawler", None):
             snap.pop("crawler", None)
         out.append({"account": _acc_number(acc), "label": acc.label, "ready": bool(acc.ready), "jobs": snap,
-                    "warmup": sched.warmup_info(), "dead": acc.dead, "proxy": await _proxy_public(acc)})
+                    "warmup": sched.warmup_info(), "dead": acc.dead, "proxy": await _proxy_public(acc),
+                    "protection": acc.protection.snapshot() if getattr(acc, "protection", None) else None})
     return {"accounts": out, "titles": JOB_TITLES}
 
 
@@ -768,6 +771,18 @@ async def admin_proxies_check(account: int = 0, authorization: str | None = Head
     ]}
 
 
+def _guard_bot_action(acc):
+    """Ручные действия в боте (профиль, вывод, проба) не выполняем, пока аккаунт в КД после FloodWait
+    или в «затишье» ультра-прогрева: иначе админка обходит защиту, которую ставит сам бот."""
+    prot = getattr(acc, "protection", None)
+    if prot is None:
+        return
+    if prot.cooldown_left() > 0:
+        raise HTTPException(status_code=409, detail=f"КД аккаунта (FloodWait) ещё {int(prot.cooldown_left())} с — действие отложено")
+    if acc.sched.lurking():
+        raise HTTPException(status_code=409, detail="Ультра-прогрев, фаза «затишье»: аккаунт не открывает бота. Подождите конца затишья")
+
+
 def _account_or_404(number: int):
     acc = next((a for a in accounts if _acc_number(a) == number), None)
     if not acc:
@@ -810,18 +825,48 @@ async def admin_proxy_url(request: Request, authorization: str | None = Header(d
 
 @app.post("/api/admin/warmup")
 async def admin_warmup(request: Request, authorization: str | None = Header(default=None)):
-    """Прогрев аккаунта: days > 0 — включить на N дней (отсчёт с этой минуты), 0 — выключить."""
+    """Прогрев аккаунта: days > 0 — включить на N дней (отсчёт с этой минуты), 0 — выключить.
+    mode: "normal" (по умолчанию; линейный рост нагрузки с 20%, до 60 дн.) или
+          "ultra"  (для хрупких аккаунтов, например тайваньских: «затишье» без активности в первые дни,
+                    затем медленный рост с 5% по кривой, тихие часы, строгий прокси, дневные бюджеты; до 90 дн.)."""
     check_admin_auth(authorization)
     b = await request.json()
     acc = _account_or_404(int(b.get("account") or 0))
+    mode = str(b.get("mode") or "normal").lower()
+    if mode not in ("normal", "ultra"):
+        raise HTTPException(status_code=400, detail="mode: normal | ultra")
     try:
         days = int(b.get("days"))
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="days: целое число дней (0 — выключить)")
-    if not 0 <= days <= 60:
-        raise HTTPException(status_code=400, detail="days: от 0 до 60")
-    persisted = await acc.sched.start_warmup(days)
-    return {"ok": True, "saved": persisted, "warmup": acc.sched.warmup_info()}
+    cap = 90 if mode == "ultra" else 60
+    if not 0 <= days <= cap:
+        raise HTTPException(status_code=400, detail=f"days: от 0 до {cap}")
+    persisted = await acc.sched.start_warmup(days, mode)
+    warning = None
+    if days and mode == "ultra" and not acc.proxy.has_proxy:
+        warning = ("Прокси для аккаунта не задан: ультра-прогрев работает с IP Render. Для азиатских номеров "
+                   "рекомендуется прокси из той же страны (вкладка «Прокси»).")
+    return {"ok": True, "saved": persisted, "warmup": acc.sched.warmup_info(), "warning": warning}
+
+
+@app.get("/api/admin/protection")
+async def admin_protection(authorization: str | None = Header(default=None)):
+    """Состояние защиты каждого аккаунта: КД, режим восстановления, FloodWait за час/сутки, бюджеты, лимитер."""
+    check_admin_auth(authorization)
+    return {"accounts": [
+        {"account": _acc_number(a), "label": a.label, "protection": a.protection.snapshot()}
+        for a in accounts if getattr(a, "protection", None)
+    ]}
+
+
+@app.post("/api/admin/protection/clear")
+async def admin_protection_clear(account: int, authorization: str | None = Header(default=None)):
+    """Ручной сброс КД/режима восстановления/штрафа аккаунта (если оператор уверен, что ограничения нет)."""
+    check_admin_auth(authorization)
+    acc = _account_or_404(account)
+    acc.protection.clear()
+    return {"ok": True, "protection": acc.protection.snapshot()}
 
 
 @app.post("/api/admin/probe-withdraw")
@@ -830,6 +875,7 @@ async def admin_probe_withdraw(account: int, authorization: str | None = Header(
     acc = next((a for a in accounts if _acc_number(a) == account), None)
     if not acc or not acc.ready:
         raise HTTPException(status_code=503, detail="Аккаунт не найден или ещё запускается")
+    _guard_bot_action(acc)
     from withdraw_probe import probe_withdraw
     return {"result": await probe_withdraw(acc)}
 
@@ -891,6 +937,7 @@ async def admin_refresh_profile(account: int, authorization: str | None = Header
     acc = next((a for a in accounts if _acc_number(a) == account), None)
     if not acc or not acc.ready:
         raise HTTPException(status_code=503, detail="Аккаунт не найден или ещё запускается")
+    _guard_bot_action(acc)
     ok = await acc._refresh_real_balance()
     ps = acc.profile_stats
     return {"ok": bool(ok), "balance": ps.balance, "friends": ps.friends, "activated": ps.activated}
@@ -904,6 +951,7 @@ async def admin_withdraw(account: int, gift: str, mode: str = "friend", friend_i
     acc = next((a for a in accounts if _acc_number(a) == account), None)
     if not acc or not acc.ready:
         raise HTTPException(status_code=503, detail="Аккаунт не найден или ещё запускается")
+    _guard_bot_action(acc)
     try:
         job = await wd.manager.start(acc, gift, mode, friend_id or None)
     except (ValueError, RuntimeError) as e:
