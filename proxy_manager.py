@@ -9,6 +9,10 @@ ProxyManager — маршрут аккаунта в Telegram: через про�
   on   — только прокси, без аварийного перехода;
   off  — только напрямую (прокси выключен), что бы ни происходило.
 
+СТРОГИЙ режим (ультра-прогрев хрупких аккаунтов, например с азиатскими номерами): аварийный переход на
+IP Render ЗАПРЕЩЁН — внезапная смена страны IP у сессии почти гарантированно приводит к заморозке.
+Если прокси временно мёртв, аккаунт ждёт его возвращения, а не «прыгает» на другой IP.
+
 Адрес прокси: из админки (настройка «proxy_url») либо из ACCOUNT_<N>_PROXY (proxy_conf.py).
 
 Переключение «на лету»: client.set_proxy() + переподключение. Пока смена идёт, аккаунт 2–5 с
@@ -57,6 +61,14 @@ class ProxyManager:
         self.state = {**proxy_check.describe_proxy(self.url), "status": "unknown", "checked_at": None}
 
     # ------------------------------------------------------------------ настройки
+    @property
+    def strict(self) -> bool:
+        """Ультра-прогрев + настроен прокси: аварийный переход на IP Render запрещён."""
+        try:
+            return bool(self.sched.ultra_active and self.has_proxy)
+        except Exception:
+            return False
+
     @property
     def mode(self) -> str:
         m = self.sched.setting("proxy_mode", "auto")
@@ -113,7 +125,7 @@ class ProxyManager:
     async def initial_route(self) -> str:
         """Вызывать ПЕРЕД первым подключением клиента. Если прокси мёртв — не зависаем в
         бесконечных повторах старта, а стартуем с IP Render (режим auto)."""
-        if self.mode == "auto" and self.has_proxy and not self.failed_over:
+        if self.mode == "auto" and self.has_proxy and not self.failed_over and not self.strict:
             if not await self._preflight():
                 self.failed_over = True
                 self._event("прокси не отвечает при старте — стартую с IP Render (проверяю прокси дальше)")
@@ -169,7 +181,7 @@ class ProxyManager:
         persisted = await self.sched.set_settings(proxy_mode=mode)
         if mode == "auto":
             self.failed_over = False
-            if self.has_proxy and self.route != "proxy" and not await self._preflight():
+            if self.has_proxy and self.route != "proxy" and not self.strict and not await self._preflight():
                 self.failed_over = True   # прокси не отвечает — остаёмся на Render, дальше следим
         await self.switch(self.target_route(), f"режим «{MODE_TITLES[mode]}» (админка)")
         await self.refresh()
@@ -182,7 +194,7 @@ class ProxyManager:
             raise ValueError("неверный формат, нужно socks5://user:pass@host:port (или socks4://, http://)")
         persisted = await self.sched.set_settings(proxy_url=url or None)
         self.failed_over = False
-        if self.mode == "auto" and self.has_proxy and not await self._preflight():
+        if self.mode == "auto" and self.has_proxy and not self.strict and not await self._preflight():
             self.failed_over = True
         await self.switch(self.target_route(), "адрес прокси изменён (админка)", force=True)
         await self.refresh()
@@ -220,6 +232,11 @@ class ProxyManager:
         if not self.has_proxy:
             return
         now = time.monotonic()
+        if self.strict:
+            if self.route == "direct" and self.failed_over:   # ушли на Render до включения ультра — возвращаемся
+                self.failed_over = False
+                await self.switch("proxy", "ультра-прогрев: возвращаюсь на прокси (смена IP недопустима)")
+            return
         if self.route == "proxy" and self._fail >= FAILOVER_AFTER:
             self.failed_over = True
             await self.switch("direct", f"прокси не работает ({self._fail} проверок подряд) — перехожу на IP Render")
@@ -231,6 +248,10 @@ class ProxyManager:
     async def on_client_down(self) -> bool:
         """Сторож аккаунта: клиент не подключается уже ~1.5 минуты. Если идём через прокси в режиме
         auto — немедленно уходим на IP Render (switch сам переподключит). -> True, если сменили."""
+        if self.strict:
+            self._event("клиент не подключается через прокси, но строгий режим ультра-прогрева запрещает "
+                        "переход на IP Render — жду возвращения прокси", notify=False)
+            return False
         if self.mode == "auto" and self.has_proxy and self.route == "proxy":
             self.failed_over = True
             return await self.switch("direct", "клиент не подключается через прокси — перехожу на IP Render")
@@ -264,7 +285,7 @@ class ProxyManager:
 
 def describe_for_ui(m: ProxyManager) -> dict:
     return {
-        "mode": m.mode, "mode_title": MODE_TITLES[m.mode],
+        "mode": m.mode, "mode_title": MODE_TITLES[m.mode], "strict": m.strict,
         "route": m.route, "failed_over": m.failed_over,
         "url_source": m.url_source, "connected": bool(m.client.is_connected()),
         "events": m.events[-5:],
