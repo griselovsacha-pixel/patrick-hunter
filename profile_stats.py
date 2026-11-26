@@ -1,4 +1,3 @@
-
 """
 ProfileStats — реальные данные профиля Patrick Hunter.
 
@@ -27,6 +26,7 @@ class ProfileStats:
         self.tg_id = None
         self.username = None
         self._reached_milestones = set()
+        self._first_parse = True   # первый разбор профиля после старта: вехи, пройденные раньше, не объявляем заново
 
         self.daily_collected_today = False
         self.tasks_completed_today = 0
@@ -57,6 +57,12 @@ class ProfileStats:
 
         if "balance" in data:
             self.balance = float(data["balance"])
+            if self._first_parse:
+                # после рестарта old_balance=0, и раньше ВСЕ вехи (15/25/50/100) объявлялись и закреплялись
+                # в группе логов заново — лишние отправки и pin_message на каждом деплое
+                old_balance = self.balance
+                self._reached_milestones.update(m for m in STAR_MILESTONES if m <= self.balance)
+                self._first_parse = False
 
             import datetime
 
