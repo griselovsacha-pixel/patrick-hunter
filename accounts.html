@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Центр аккаунтов</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<style>
+:root{--bg:#050505;--panel:#0c0c0c;--panel2:#131313;--line:#242424;--tx:#f4f4f4;--mu:#8c8c8c;--ac:#fff;--ok:#8fd4a4;--bad:#e7807a;--blue:#c9c9c9;
+ color-scheme:dark;font-family:"Inter",-apple-system,"Segoe UI",system-ui,sans-serif}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font-size:14px}
+button,input,select,textarea{font:inherit;color:inherit}
+input,select,textarea{background:#050505;border:1px solid var(--line);border-radius:6px;padding:7px 9px;width:100%}
+input[type=checkbox]{width:auto}textarea{min-height:84px;resize:vertical}
+input:focus,select:focus,textarea:focus,button:focus-visible{outline:2px solid var(--ac);outline-offset:1px}
+button{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:7px 13px;cursor:pointer}
+button:hover{border-color:var(--mu)}button.pri{background:var(--ac);color:#000;border-color:var(--ac);font-weight:600}
+button.sm{padding:3px 9px;font-size:12px}
+button.dng{color:var(--bad)}button:disabled{opacity:.45;cursor:default}
+.app{display:grid;grid-template-columns:270px 1fr;min-height:100vh}
+aside{border-right:1px solid var(--line);padding:14px 10px;display:flex;flex-direction:column;gap:3px;position:sticky;top:0;height:100vh;overflow:auto}
+aside h1{font-size:16px;margin:2px 8px 12px}aside h4{margin:14px 8px 4px;color:var(--mu);font-weight:500;font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+.item{display:flex;gap:10px;align-items:center;padding:8px;border-radius:8px;cursor:pointer;border:1px solid transparent}
+.item:hover{background:var(--panel)}.item.on{background:var(--panel);border-color:var(--line)}.item small{color:var(--mu);display:block}
+.av{width:38px;height:38px;border-radius:50%;background:#1c1c1c;border:1px solid var(--line);flex:none;object-fit:cover;display:grid;place-items:center;font-weight:600}
+.av.big{width:84px;height:84px;font-size:28px}
+.dot{width:8px;height:8px;border-radius:50%;margin-left:auto;flex:none}
+main{padding:22px 28px;max-width:1100px}
+h2{margin:0 0 16px;font-size:20px}h3{margin:22px 0 8px;font-size:13px;color:var(--mu);font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+.tabs{display:flex;gap:2px;border-bottom:1px solid var(--line);margin:16px 0;flex-wrap:wrap}
+.tabs button{border:0;border-bottom:2px solid transparent;border-radius:0;background:none;color:var(--mu)}
+.tabs button.on{color:var(--tx);border-color:var(--ac)}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px}
+.kv{display:grid;grid-template-columns:150px 1fr;gap:7px 12px}.kv dt{color:var(--mu)}.kv dd{margin:0;word-break:break-all}
+label{display:block;color:var(--mu);margin:10px 0 4px;font-size:13px}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.row>input{width:auto;flex:1;min-width:60px}
+table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line)}
+th{color:var(--mu);font-weight:500}tr.click{cursor:pointer}tr.click:hover{background:var(--panel)}
+.tag{padding:2px 8px;border-radius:99px;border:1px solid var(--line);font-size:12px;white-space:nowrap}
+.ok{color:var(--ok)}.bad{color:var(--bad)}.warn{color:var(--ac)}.mu{color:var(--mu)}
+.chk{display:flex;gap:8px;align-items:center;margin:8px 0;color:var(--tx)}
+.banner{border:1px solid var(--bad);color:var(--bad);border-radius:8px;padding:10px 14px;margin:12px 0}
+.num{max-width:84px}
+#toast{position:fixed;bottom:18px;right:18px;background:var(--panel);border:1px solid var(--line);padding:10px 14px;border-radius:8px;display:none;max-width:360px;z-index:9}
+.bar{height:5px;background:#1c1c1c;border-radius:4px;overflow:hidden;min-width:90px;margin-bottom:3px}.bar>i{display:block;height:100%;background:var(--tx);transition:width .4s}
+.days{display:flex;gap:4px;margin:10px 0 2px}.days i{flex:1;height:8px;border-radius:3px;background:#1c1c1c}.days i.d{background:#8c8c8c}.days i.c{background:#fff}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:6px}.stat{padding:12px 14px}.sv{font-size:24px;font-weight:600}
+.back{color:var(--mu);text-decoration:none;margin:2px 8px 10px;display:block;font-size:13px}.back:hover{color:var(--tx)}
+#qr{background:#fff;padding:10px;display:inline-block;border-radius:8px;margin:8px 0}
+.pv{width:110px;height:110px;border-radius:50%;object-fit:cover;background:#1c1c1c;display:block;margin-bottom:8px}
+@media(max-width:760px){.app{grid-template-columns:1fr}aside{position:static;height:auto}main{padding:16px}}
+</style></head><body>
+<div class="app"><aside id="side"></aside><main id="main"></main></div><div id="toast"></div>
+<script>
+const $=s=>document.querySelector(s),esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const ST={new:['новый','#7d939e'],warming:['прогрев','#f0b44c'],ready:['прогрет, ждёт','#5fd38d'],working:['в воронке','#6aaaf0'],banned:['бан','#ef6a62'],dead:['сессия мертва','#ef6a62']};
+const ZN={morning:'утро',day:'день',evening:'вечер'};
+const PF={name:'имя',username:'юзернейм',avatar:'аватарка',bio:'описание'};
+const TK={session:'Сессия (чтение, реакции)',p_name:'Профиль: имя',p_username:'Профиль: юзернейм',p_avatar:'Профиль: аватарка',p_bio:'Профиль: описание'};
+const TS={pending:['ожидает','mu'],running:['идёт…','warn'],done:['готово','ok'],failed:['ошибка','bad'],missed:['пропущено','warn']};
+let SET=null,accs=[],view='overview',sel=null,sub='info',poll=null,PP={};
+
+function toast(t){const e=$('#toast');e.textContent=t;e.style.display='block';clearTimeout(toast.t);toast.t=setTimeout(()=>e.style.display='none',4500)}
+async function api(path,opt={}){
+  const h={};if(typeof opt.body==='string')h['Content-Type']='application/json';Object.assign(h,opt.headers||{});
+  const r=await fetch('/api/accounts'+path,{credentials:'same-origin',method:opt.method,body:opt.body,headers:h}),j=await r.json().catch(()=>({}));
+  if(!r.ok)throw new Error(j.error||j.detail||('HTTP '+r.status));return j}
+const post=(p,o)=>api(p,{method:'POST',body:JSON.stringify(o||{})}),patch=(p,o)=>api(p,{method:'PATCH',body:JSON.stringify(o)});
+async function run(fn,ok){try{const r=await fn();if(ok)toast(ok);return r}catch(e){toast('Ошибка: '+e.message)}}
+async function load(){accs=await run(()=>api(''))||accs;SET=await run(()=>api('/settings'))||SET;drawSide();draw()}
+const A=()=>accs.find(a=>a.id===sel),name=a=>a.label||a.first_name||('#'+a.id);
+const avatar=(a,c='')=>a.avatar?`<img class="av ${c}" src="${a.avatar}" alt="">`:`<div class="av ${c}">${esc((name(a)[0]||'?').toUpperCase())}</div>`;
+const fdt=s=>s?new Date(s).toLocaleString('ru',{dateStyle:'short',timeStyle:'short',timeZone:'Europe/Kyiv'}):'—';
+const ftm=s=>new Date(s).toLocaleTimeString('ru',{timeStyle:'short',timeZone:'Europe/Kyiv'});
+const fday=s=>new Date(s).toLocaleDateString('ru',{weekday:'short',day:'numeric',month:'short',timeZone:'Europe/Kyiv'});
+const lines=id=>$(id).value.split('\n').map(s=>s.trim()).filter(Boolean),num=id=>+$(id).value;
+const field=(id,l,v,t='text',x='')=>`<label>${l}</label><input id="${id}" type="${t}" value="${esc(v)}" ${x}>`;
+
+function drawSide(){
+  const prep=accs.filter(a=>a.status!=='working'),fun=accs.filter(a=>a.status==='working');
+  const it=a=>`<div class="item ${view==='acc'&&sel===a.id?'on':''}" onclick="go('acc',${a.id})">${avatar(a)}<div><div>${esc(name(a))}</div><small>${a.username?'@'+esc(a.username):'ID '+(a.tg_id||'—')}${a.status==='warming'&&a.day?' · день '+a.day:''}</small></div><span class="dot" style="background:${ST[a.status]?.[1]}" title="${ST[a.status]?.[0]}"></span></div>`;
+  $('#side').innerHTML=`<a class="back" href="/admin">← Админка</a><h1>Центр аккаунтов</h1>
+  <div class="item ${view==='overview'?'on':''}" onclick="go('overview')"><b>Сводка</b><small style="margin-left:auto">${accs.length}</small></div>
+  <div class="item ${view==='add'?'on':''}" onclick="go('add')"><b>+ Добавить аккаунт</b></div>
+  <div class="item ${view==='settings'?'on':''}" onclick="go('settings')"><b>Настройки плана</b></div>
+  <h4>Подготовка · ${prep.length}</h4>${prep.map(it).join('')||'<div class="mu" style="padding:6px 8px">пусто</div>'}
+  <h4>В воронке · ${fun.length}</h4>${fun.map(it).join('')||'<div class="mu" style="padding:6px 8px">пусто</div>'}`}
+function go(v,id){clearInterval(poll);view=v;if(id)sel=id;drawSide();draw()}
+function draw(){const m=$('#main');({overview,add,acc,settings}[view]||overview)(m)}
+
+const spamTag=a=>a.spam_status==='free'?'<span class="ok">чист</span>':a.spam_status==='limited'?'<span class="bad">спамблок</span>':'<span class="mu">не проверен</span>';
+const waitTag=a=>{const w=a.wstate?.wait_until;return w&&w*1000>Date.now()?`<span class="bad">flood до ${new Date(w*1000).toLocaleTimeString('ru',{timeStyle:'short',timeZone:'Europe/Kyiv'})}</span>`:'<span class="mu">нет</span>'};
+const proxyTag=a=>!a.proxy_on?'<span class="mu">выкл</span>':a.proxy_status==='ok'?`<span class="ok">ok ${a.proxy_ms||''}мс</span>`:`<span class="bad">${a.proxy_status}</span>`;
+
+/* ── сводка ── */
+const farmTag=a=>!a.farm?'<span class="warn">ждёт запуска в боте (до минуты)</span>':a.farm.dead?`<span class="bad">остановлен: ${esc(a.farm.dead)}</span>`:a.farm.ready?`<span class="ok">работает в боте, «Аккаунт ${a.farm.number}»</span>`:'<span class="warn">запускается…</span>';
+function progress(a,days){
+  if(a.status==='warming'){const p=Math.min(100,Math.round((((a.day||1)-1)+(a.today_total?a.today_done/a.today_total:0))/days*100));
+    return `<div class="bar"><i style="width:${p}%"></i></div><span class="mu">день ${a.day} из ${days} · сегодня ${a.today_done}/${a.today_total}${a.warmup_enabled?'':' · <b class="warn">пауза</b>'}</span>`}
+  if(a.status==='ready')return '<span class="ok">прогрев завершён</span>';
+  if(a.status==='working')return farmTag(a)+(a.funnel_warmup_until?`<div class="mu">прогрев в боте до ${fdt(a.funnel_warmup_until).split(',')[0]}</div>`:'');
+  return '<span class="mu">—</span>'}
+async function quick(id,act){await run(()=>act==='funnel'?post(`/${id}/funnel`):post(`/${id}/warmup/${act}`),act==='funnel'?'Аккаунт в воронке':'Прогрев запущен');load()}
+function overview(m){
+  const days=SET?.plan.days||7,n=s=>accs.filter(a=>a.status===s).length,
+   stat=(v,l,c='')=>`<div class="card stat"><div class="sv ${c}">${v}</div><div class="mu">${l}</div></div>`;
+  const act=a=>a.status==='new'?`<button class="sm pri" onclick="event.stopPropagation();quick(${a.id},'start')">▶ Прогрев</button>`:a.status==='ready'?`<button class="sm pri" onclick="event.stopPropagation();goFunnel(${a.id})">В воронку →</button>`:'';
+  const row=a=>`<tr class="click" onclick="go('acc',${a.id})"><td><div class="row" style="flex-wrap:nowrap">${avatar(a)}<div>${esc(name(a))}<div class="mu">${a.username?'@'+esc(a.username):''} ${a.tg_id||''}</div></div></div></td>
+   <td><span class="tag" style="color:${ST[a.status]?.[1]}">${ST[a.status]?.[0]}</span></td><td style="min-width:150px">${progress(a,days)}</td>
+   <td>${a.next_at&&a.status==='warming'&&a.warmup_enabled?fdt(a.next_at):'<span class="mu">—</span>'}</td><td>${spamTag(a)}</td><td>${waitTag(a)}</td><td>${proxyTag(a)}</td><td>${a.has_2fa==null?'—':a.has_2fa?'есть':'нет'}</td><td>${act(a)}</td></tr>`;
+  const tbl=l=>`<div class="card" style="padding:0;overflow:auto"><table><tr><th>Аккаунт</th><th>Статус</th><th>Прогресс</th><th>След. задача (Киев)</th><th>Спамблок</th><th>Flood</th><th>Прокси</th><th>2FA</th><th></th></tr>${l.map(row).join('')||'<tr><td colspan=9 class="mu">Пусто</td></tr>'}</table></div>`;
+  m.innerHTML=`<h2>Сводка</h2><div class="stats">${stat(n('new'),'новых')}${stat(n('warming'),'греются','warn')}${stat(n('ready'),'готовы к воронке','ok')}${stat(n('working'),'в воронке')}
+   ${stat(accs.filter(a=>a.spam_status==='limited').length,'со спамблоком','bad')}${stat(accs.reduce((x,a)=>x+(+a.comments_total||0),0),'комментариев всего')}</div>
+   <div class="row" style="margin:14px 0"><button class="pri" onclick="bulkStart()" ${n('new')?'':'disabled'}>▶ Запустить прогрев всем новым (${n('new')})</button><button onclick="bulk(false)">Обновить все</button><button onclick="bulk(true)">Обновить + спамблок</button></div>
+   <h3>Подготовка</h3>${tbl(accs.filter(a=>a.status!=='working'))}<h3>В воронке</h3>${tbl(accs.filter(a=>a.status==='working'))}`}
+async function bulkStart(){if(!confirm('Запустить прогрев всем новым аккаунтам? Каналы подберутся из общего пула.'))return;const r=await run(()=>post('/bulk/start'));if(r)toast('Запущено: '+r.started);load()}
+async function bulk(spam){for(const a of accs.filter(a=>a.status!=='dead')){toast('Обновляю '+name(a)+'…');await run(()=>post(`/${a.id}/refresh?spam=${spam?1:0}`))}await load();toast('Готово')}
+
+/* ── добавление ── */
+let LOGIN={};
+function add(m){
+  m.innerHTML=`<h2>Добавить аккаунт</h2><div class="card"><div class="grid"><div>${field('a_proxy','Прокси (необязательно)','','text','placeholder="socks5://user:pass@host:port"')}</div>
+  <div><label>Язык аккаунта</label><select id="a_lang"><option>ru</option><option>uk</option><option>en</option></select></div></div></div>
+  <div class="grid" style="margin-top:14px">
+   <div class="card"><b>По номеру и коду</b>${field('ph','Номер','','text','placeholder="+380…"')}
+    <div class="row" style="margin-top:8px"><button class="pri" onclick="sendPhone()">Получить код</button></div>
+    <div id="codeBox" style="display:none">${field('code','Код из Telegram','','text','inputmode="numeric"')}<div class="row" style="margin-top:8px"><button class="pri" onclick="sendCode()">Войти</button></div></div></div>
+   <div class="card"><b>По QR-коду</b><div class="mu">Telegram на другом устройстве → Настройки → Устройства → Подключить устройство</div>
+    <div class="row" style="margin-top:8px"><button class="pri" onclick="startQR()">Показать QR</button></div><div id="qr" style="display:none"></div></div>
+   <div class="card"><b>Файл или строка</b><div class="mu">tdata (zip), .session, либо StringSession</div>
+    <label>Файл</label><input type="file" id="file" accept=".zip,.session"><label>…или строка сессии</label><textarea id="sess" style="min-height:56px"></textarea>
+    <div class="grid">${field('imp_api','api_id сессии (если знаешь)','','number')}${field('imp_hash','api_hash','')}</div>
+    <div class="mu" style="margin-top:4px">Если у продавца есть .json с app_id/app_hash — впиши: аккаунт лучше заходить с теми же параметрами, с которыми его создали. Для tdata не нужно.</div>
+    ${field('lbl','Название (необязательно)','')}<div class="row" style="margin-top:8px"><button class="pri" onclick="doImport()">Импортировать</button></div></div></div>
+  <div id="pwBox" class="card" style="display:none;margin-top:14px"><b>Нужен пароль 2FA</b><div class="row" style="margin-top:8px"><input id="pw" type="password"><button class="pri" onclick="sendPw()">Подтвердить</button></div></div>`}
+const ctx=()=>({proxy:$('#a_proxy').value.trim()||null,lang:$('#a_lang').value});
+async function added(r){if(!r?.id)return;toast('Аккаунт добавлен');sel=r.id;sub='info';await load();go('acc',r.id)}
+async function sendPhone(){const r=await run(()=>post('/login/phone',{phone:$('#ph').value,...ctx()}),'Код отправлен');if(r){LOGIN.token=r.token;$('#codeBox').style.display='block'}}
+async function sendCode(){const r=await run(()=>post('/login/code',{token:LOGIN.token,code:$('#code').value}));if(r?.need_password)$('#pwBox').style.display='block';else added(r)}
+async function sendPw(){added(await run(()=>post('/login/code',{token:LOGIN.token,password:$('#pw').value})))}
+async function startQR(){const r=await run(()=>post('/login/qr',ctx()));if(!r)return;LOGIN.token=r.token;const q=$('#qr');q.style.display='inline-block';let cur=null;
+  const paint=u=>{if(cur===u)return;q.innerHTML='';new QRCode(q,{text:u,width:200,height:200});cur=u};paint(r.url);
+  clearInterval(poll);poll=setInterval(async()=>{try{const p=await api('/login/qr/poll?token='+LOGIN.token);
+   if(p.waiting)paint(p.url);else{clearInterval(poll);if(p.need_password)$('#pwBox').style.display='block';else added(p)}}catch(e){clearInterval(poll);toast('QR: '+e.message)}},2500)}
+async function doImport(){const c=ctx(),file=$('#file').files[0];toast('Импортирую…');
+  const meta={proxy:c.proxy||'',lang:c.lang,label:$('#lbl').value,api_id:$('#imp_api').value,api_hash:$('#imp_hash').value};
+  if(file)added(await run(()=>api('/import/file?'+new URLSearchParams(meta),{method:'POST',body:file,headers:{'X-Filename':encodeURIComponent(file.name),'Content-Type':'application/octet-stream'}})));
+  else added(await run(()=>api('/import',{method:'POST',body:JSON.stringify({...meta,session:$('#sess').value})})))}
+
+/* ── карточка аккаунта ── */
+function acc(m){const a=A();if(!a){m.innerHTML='<p class="mu">Выбери аккаунт слева</p>';return}
+  const inF=a.status==='working';
+  m.innerHTML=`<div class="row" style="gap:16px;flex-wrap:nowrap">${avatar(a,'big')}<div><h2 style="margin:0">${esc(name(a))}</h2>
+   <div class="mu">${a.username?'@'+esc(a.username)+' · ':''}ID ${a.tg_id||'—'} · ${a.phone?'+'+esc(a.phone):''}</div><span class="tag" style="color:${ST[a.status]?.[1]}">${ST[a.status]?.[0]}</span>${inF?' '+farmTag(a):''}</div>
+   <div style="margin-left:auto" class="row"><button onclick="doRefresh(${a.id},0)">Обновить</button><button onclick="doRefresh(${a.id},1)">Проверить спамблок</button>
+   ${inF?'':`<button class="pri" onclick="toFunnel()">В основную воронку →</button>`}</div></div>
+   ${a.last_error?`<p class="bad">Последняя ошибка: ${esc(a.last_error)}</p>`:''}
+   <div class="tabs">${[['info','Обзор'],['profile','Профиль'],['warm','Прогрев'],['access','Прокси и доступ'],['logs','Логи']].map(([k,t])=>`<button class="${sub===k?'on':''}" onclick="sub='${k}';draw()">${t}</button>`).join('')}</div><div id="sub"></div>`;
+  ({info:tInfo,profile:tProfile,warm:tWarm,access:tAccess,logs:tLogs}[sub])(a,$('#sub'))}
+async function doRefresh(id,spam){toast('Подключаюсь…');await run(()=>post(`/${id}/refresh?spam=${spam}`),'Обновлено');load()}
+async function toFunnel(){goFunnel(sel)}
+async function goFunnel(id){const a=accs.find(x=>x.id===id),d=SET.plan.funnel_days,notes=[];
+  if(a.status!=='ready')notes.push(`прогрев ещё не завершён (день ${a.day||0} из ${SET.plan.days})`);if(a.spam_status==='limited')notes.push('на аккаунте спамблок');
+  if(!confirm(`Перенести «${name(a)}» в основную воронку?\n${notes.length?'\nВнимание: '+notes.join('; ')+'.\n':''}\nЦентр перестанет с ним работать. В течение ~минуты он запустится в боте как «Аккаунт ${SET.funnel_base+id}», обычный прогрев — ${d} дн.`))return;
+  await run(()=>post(`/${id}/funnel`),'Аккаунт в воронке');await load();go('overview')}
+
+function tInfo(a,e){e.innerHTML=`<div class="grid"><div class="card"><dl class="kv">
+  <dt>Имя</dt><dd>${esc([a.first_name,a.last_name].filter(Boolean).join(' '))||'—'}</dd><dt>Username</dt><dd>${a.username?'@'+esc(a.username):'—'}</dd>
+  <dt>ID</dt><dd>${a.tg_id||'—'}</dd><dt>Телефон</dt><dd>${a.phone?'+'+esc(a.phone):'—'}</dd><dt>2FA</dt><dd>${a.has_2fa==null?'—':a.has_2fa?'есть':'нет'}</dd>
+  <dt>Спамблок</dt><dd>${spamTag(a)} <span class="mu">${a.spam_checked_at?fdt(a.spam_checked_at):''}</span></dd><dt>Flood / wait</dt><dd>${waitTag(a)}</dd><dt>Прокси</dt><dd>${proxyTag(a)}</dd>
+  <dt>Добавлен</dt><dd>${fdt(a.created_at)}</dd><dt>Последний вход ок</dt><dd>${fdt(a.last_seen_ok)}</dd></dl>
+  ${a.spam_status==='limited'&&a.spam_text?`<p class="mu">Ответ @SpamBot: ${esc(a.spam_text)}</p>`:''}</div>
+  <div class="card">${field('f_label','Название',a.label||'')}<label>Язык</label><select id="f_lang">${['ru','uk','en'].map(l=>`<option ${a.lang===l?'selected':''}>${l}</option>`).join('')}</select>
+  ${field('f_country','Страна',a.country||'')}${field('f_reg','Дата регистрации в Telegram (от продавца)',(a.registered_at||'').slice(0,10),'date')}
+  <label>Заметки</label><textarea id="f_notes">${esc(a.notes)}</textarea><div class="row" style="margin-top:10px"><button class="pri" onclick="saveInfo()">Сохранить</button></div></div></div>`}
+async function saveInfo(){await run(()=>patch('/'+sel,{label:$('#f_label').value,lang:$('#f_lang').value,country:$('#f_country').value,registered_at:$('#f_reg').value,notes:$('#f_notes').value}),'Сохранено');load()}
+
+/* ── профиль (будущий) ── */
+function tProfile(a,e){PP={...(a.profile_plan||{})};const done=a.wstate?.profile_done||[],P=SET.plan;
+  const st=f=>done.includes(f)?'<span class="ok">установлено ✓</span>':`<span class="mu">день ${P.profile_days[f]}, ${ZN[P.profile_zones[f]]}</span>`;
+  e.innerHTML=`<p class="mu" style="max-width:660px">Заполни заранее. Скрипт сам поставит по одному действию в своё время, с паузами ≥${P.profile_gap_min} мин между ними (расписание — в «Настройки плана»). Пустое поле просто пропускается.</p>
+  <div class="grid"><div class="card"><div class="row" style="justify-content:space-between"><b>Имя и юзернейм</b><span>${st('name')}</span></div>${field('pp_fn','Имя (first name)',PP.first_name||'')}${field('pp_ln','Фамилия (необязательно)',PP.last_name||'')}
+   <div class="row" style="justify-content:space-between;margin-top:14px"><b>Юзернейм</b><span>${st('username')}</span></div>${field('pp_un','Юзернейм без @',PP.username||'')}
+   <div class="row" style="margin-top:8px"><button onclick="chkUn()">Проверить, свободен ли</button><span id="un_res" class="mu"></span></div></div>
+  <div class="card"><div class="row" style="justify-content:space-between"><b>Аватарка</b><span>${st('avatar')}</span></div><img id="pp_av" class="pv" ${PP.avatar?`src="${PP.avatar}"`:''} alt="">
+   <input type="file" accept="image/*" onchange="pickAvatar(this)"><div class="mu" style="margin-top:4px">Обрежется до квадрата 640×640</div>
+   <div class="row" style="justify-content:space-between;margin-top:14px"><b>Описание</b><span>${st('bio')}</span></div><textarea id="pp_bio" maxlength="70" style="min-height:60px">${esc(PP.bio||'')}</textarea><div class="mu">до 70 символов</div></div></div>
+  <div class="row" style="margin-top:14px"><button class="pri" onclick="saveProfile()">Сохранить профиль</button></div>`}
+function pickAvatar(inp){const f=inp.files[0];if(!f)return;const img=new Image();img.onload=()=>{const s=Math.min(img.width,img.height),cv=document.createElement('canvas');cv.width=cv.height=640;
+  cv.getContext('2d').drawImage(img,(img.width-s)/2,(img.height-s)/2,s,s,0,0,640,640);PP.avatar=cv.toDataURL('image/jpeg',.88);$('#pp_av').src=PP.avatar};img.src=URL.createObjectURL(f)}
+async function chkUn(){const u=$('#pp_un').value.trim();if(!u)return;$('#un_res').textContent='проверяю…';try{const r=await post(`/${sel}/check-username`,{username:u});$('#un_res').innerHTML=r.free?'<span class="ok">свободен</span>':'<span class="bad">занят</span>'}catch(e){$('#un_res').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
+async function saveProfile(){await run(()=>patch('/'+sel,{profile_plan:{first_name:$('#pp_fn').value.trim(),last_name:$('#pp_ln').value.trim(),username:$('#pp_un').value.trim(),bio:$('#pp_bio').value.trim(),avatar:PP.avatar||null}}),'Профиль сохранён');load()}
+
+/* ── прогрев ── */
+async function tWarm(a,e){const P=SET.plan,on=a.warmup_enabled;
+  const ch=(a.channels||[]);
+  const strip=Array.from({length:P.days},(_,i)=>`<i class="${a.status==='ready'||a.status==='working'||i+1<(a.day||0)?'d':i+1===a.day&&a.status==='warming'?'c':''}"></i>`).join('');
+  e.innerHTML=`${a.spam_status==='limited'?'<div class="banner">На аккаунте спамблок: комментарии отключены, остальное (чтение, реакции, профиль) работает.</div>':''}
+  <div class="card"><div class="row"><b>${on?`Идёт: день ${a.day} из ${P.days}`:a.status==='ready'?'Прогрев завершён — можно в воронку':a.status==='working'?'Аккаунт в воронке, центр его не трогает':'Прогрев не запущен'}</b>
+   <span style="margin-left:auto" class="row"><button class="pri" onclick="warm('start')" ${a.status==='working'?'disabled':''}>Запустить</button><button onclick="warm('stop')">Пауза</button>
+   <button onclick="warm('replan')">Пересоставить сегодня</button><button onclick="warm('next')">Ближайшую задачу сейчас</button><button class="dng" onclick="if(confirm('Начать прогрев заново с дня 1?'))warm('reset')">С нуля</button></span></div>
+   <div class="days">${strip}</div><p class="mu" style="margin:8px 0 0">${a.status==='warming'?`Сегодня выполнено сессий: ${a.today_done} из ${a.today_total}. `:''}День 1 — только чтение, день 2 — мягко, 3+ — полный план. Время задач каждый день случайное в пределах зон (по Киеву).</p></div>
+  <h3>Каналы аккаунта (${ch.length} из 5)</h3><div class="card"><label>Юзернеймы, по одному в строке. За сессию читаются 1–3 из них, вступление в канал — только при первом чтении.</label>
+   <textarea id="w_ch" style="min-height:120px">${esc(ch.join('\n'))}</textarea><div class="row" style="margin-top:8px"><button class="pri" onclick="saveCh()">Сохранить каналы</button><button onclick="autoCh()">Подобрать 5 из пула</button><button onclick="chkCh()">Проверить каналы</button></div><div id="ch_res" class="mu" style="margin-top:8px"></div>
+   <div class="mu" style="margin-top:6px">Лучше разные наборы на разных аккаунтах — одинаковые посты у всех твинков выглядят как стая.</div></div>
+  <h3>Расписание</h3><div id="sched" class="card mu">Загрузка…</div>`;
+  const t=await run(()=>api(`/${a.id}/tasks`))||[],by={};t.forEach(x=>(by[fday(x.run_at)]??=[]).push(x));
+  $('#sched').classList.remove('mu');
+  $('#sched').innerHTML=Object.keys(by).map(d=>`<b>${d}</b><table style="margin:6px 0 14px">${by[d].sort((x,y)=>new Date(x.run_at)-new Date(y.run_at)).map(x=>`<tr><td style="width:70px">${ftm(x.run_at)}</td>
+   <td>${TK[x.kind]||x.kind} <span class="mu">${x.payload?.zone?'· '+ZN[x.payload.zone]:''}${x.payload?.comment?' · с комментарием':''}</span></td><td class="${TS[x.status][1]}" style="width:90px">${TS[x.status][0]}</td><td class="mu">${esc(x.result||'')}</td></tr>`).join('')}</table>`).join('')||'<span class="mu">Задач пока нет. Нажми «Запустить» — расписание составится автоматически.</span>'}
+async function warm(act){await run(()=>post(`/${sel}/warmup/${act}`),{start:'Прогрев запущен',stop:'Пауза',replan:'Расписание на сегодня пересоставится в течение минуты',next:'Ближайшая задача начнётся в течение минуты',reset:'Начато заново'}[act]);await load()}
+async function saveCh(){const r=await run(()=>patch('/'+sel,{channels:lines('#w_ch')}),'Каналы сохранены');if(r&&r.channels.length!==5)toast('Сохранено, но каналов '+r.channels.length+' из 5');load()}
+async function chkCh(){const e=$('#ch_res');e.textContent='Проверяю через аккаунт… (до минуты)';
+  try{const r=await post(`/${sel}/channels/check`);e.innerHTML=r.map(x=>x.ok?`<div><span class="ok">✓</span> ${esc(x.ch)} — ${esc(x.title)}${x.members?', '+x.members+' подп.':''} · ${x.comments?'комментарии есть':'<span class="warn">комментариев нет</span>'}</div>`:`<div><span class="bad">✗</span> ${esc(x.ch)} — ${esc(x.err)}</div>`).join('')||'Каналы не заданы'}catch(e2){e.innerHTML='<span class="bad">'+esc(e2.message)+'</span>'}}
+async function autoCh(){await run(()=>post(`/${sel}/channels/auto`),'Выбраны 5 случайных');load()}
+
+/* ── доступ ── */
+function tAccess(a,e){e.innerHTML=`<div class="grid"><div class="card">${field('p_proxy','Прокси',a.proxy||'','text','placeholder="socks5://user:pass@host:port"')}
+  <label class="chk"><input type="checkbox" id="p_on" ${a.proxy_on?'checked':''}>Использовать прокси (выкл — IP сервера)</label><div>Статус: ${proxyTag(a)}</div>
+  <div class="row" style="margin-top:10px"><button class="pri" onclick="saveProxy()">Сохранить и проверить</button></div></div>
+  <div class="card"><label>Статус аккаунта</label><select id="p_st">${Object.keys(ST).map(k=>`<option value="${k}" ${a.status===k?'selected':''}>${ST[k][0]}</option>`).join('')}</select>
+  ${a.moved_at?`<p class="mu">В воронке с ${fdt(a.moved_at)}${a.funnel_warmup_until?', обычный прогрев воронки до '+fdt(a.funnel_warmup_until):''}</p>`:''}
+  <div class="row" style="margin-top:10px"><button class="pri" onclick="saveAccess()">Сохранить</button><button class="dng" onclick="del()">Удалить аккаунт</button></div></div></div>`}
+async function saveProxy(){await run(()=>patch('/'+sel,{proxy:$('#p_proxy').value.trim(),proxy_on:$('#p_on').checked}));await doRefresh(sel,0)}
+async function saveAccess(){await run(()=>patch('/'+sel,{status:$('#p_st').value}),'Сохранено');load()}
+async function del(){if(!confirm('Удалить аккаунт и его сессию из центра?'))return;await run(()=>api('/'+sel,{method:'DELETE'}),'Удалён');sel=null;view='overview';load()}
+async function tLogs(a,e){e.innerHTML='<div class="card mu">Загрузка…</div>';const l=await run(()=>api(`/${a.id}/logs`))||[];
+  e.innerHTML=`<div class="card" style="padding:0;overflow:auto"><table>${l.map(r=>`<tr><td class="mu" style="white-space:nowrap">${fdt(r.ts)}</td><td class="${r.kind==='error'?'bad':''}">${esc(r.kind)}</td><td>${esc(r.text)}</td></tr>`).join('')||'<tr><td class="mu">Пока пусто</td></tr>'}</table></div>`}
+
+/* ── настройки плана ── */
+function settings(m){
+  if(!SET){m.innerHTML='<p class="mu">Загрузка…</p>';return}
+  const P=SET.plan,g=SET.gemini,zsel=(id,v)=>`<select id="${id}">${Object.keys(ZN).map(z=>`<option value="${z}" ${v===z?'selected':''}>${ZN[z]}</option>`).join('')}</select>`;
+  const dayRow=(k,l)=>{const d=P.day_plan[k];return `<tr><td>${l}</td><td><input class="num" type="number" id="d_${k}_z" value="${d.zones}" min="1" max="3"></td>
+   <td><div class="row" style="flex-wrap:nowrap"><input class="num" type="number" id="d_${k}_p0" value="${d.posts[0]}"><input class="num" type="number" id="d_${k}_p1" value="${d.posts[1]}"></div></td>
+   <td><input type="checkbox" id="d_${k}_r" ${d.react?'checked':''}></td><td><input class="num" type="number" id="d_${k}_mr" value="${d.max_react}"></td><td><input type="checkbox" id="d_${k}_c" ${d.comment?'checked':''}></td></tr>`};
+  m.innerHTML=`<h2>Настройки плана</h2><p class="mu" style="max-width:680px">Один план на все аккаунты в подготовке. Время везде киевское. Изменения подхватываются со следующего дня или после «Пересоставить сегодня».</p>
+  <h3>Зоны активности (часы, Киев)</h3><div class="card"><div class="grid">${Object.keys(ZN).map(z=>`<div><label>${ZN[z]}</label><div class="row"><input type="number" id="z_${z}0" value="${P.zones[z][0]}"><span>–</span><input type="number" id="z_${z}1" value="${P.zones[z][1]}"></div></div>`).join('')}
+   <div>${field('p_days','Длительность прогрева, дней',P.days,'number')}</div></div></div>
+  <h3>Нагрузка по дням</h3><div class="card" style="overflow:auto"><table><tr><th>День</th><th>Сессий</th><th>Постов (от–до)</th><th>Реакции</th><th>Макс. реакций</th><th>Коммент</th></tr>${dayRow('1','1')}${dayRow('2','2')}${dayRow('default','3 и далее')}</table>
+   <div class="grid" style="margin-top:10px"><div><label>Каналов за сессию (от–до)</label><div class="row"><input type="number" id="p_c0" value="${P.channels_per_session[0]}"><input type="number" id="p_c1" value="${P.channels_per_session[1]}"></div></div>
+   ${field('p_ratio','Доля постов с реакцией (0.55: 4 поста→2, 7→4)',P.react_ratio,'number','step="0.05"')}${field('p_skip','Шанс пропустить сессию с 3 дня, %',Math.round(P.skip_chance*100),'number')}</div></div>
+  <h3>Профиль (ник, юзернейм, аватарка, описание)</h3><div class="card"><div class="grid">${Object.keys(PF).map(f=>`<div><label>${PF[f]}: день и зона</label><div class="row"><input type="number" class="num" id="pd_${f}" value="${P.profile_days[f]}">${zsel('pz_'+f,P.profile_zones[f])}</div></div>`).join('')}
+   ${field('p_gap','Минимум минут между любыми действиями аккаунта',P.profile_gap_min,'number')}${field('p_fun','Обычный прогрев в воронке, дней',P.funnel_days,'number')}</div></div>
+  <h3>Общий пул каналов</h3><div class="card"><label>Юзернеймы, по одному в строке. Из него «Запустить» берёт 5 случайных каналов аккаунту, у которого каналы не заданы.</label><textarea id="p_pool" style="min-height:130px">${esc(P.channel_pool.join('\n'))}</textarea>
+   <label>Реакции (повтор в списке = больший вес)</label><textarea id="p_react" style="min-height:60px">${esc(P.reactions.join('\n'))}</textarea></div>
+  <h3>Gemini: комментарии</h3><div class="card"><p style="margin:0 0 8px">${SET.gemini_key_set?'<span class="ok">Ключ найден</span>':'<span class="bad">Ключ не задан</span> — добавь GEMINI_API_KEY (или несколько через запятую в GEMINI_API_KEYS) в Render'}</p>
+   <label class="chk"><input type="checkbox" id="g_en" ${g.enabled?'checked':''}>Писать комментарии через Gemini (без Gemini комментарии не пишутся — шаблонов нет)</label>
+   <div class="grid">${field('g_model','Приоритетная модель (пусто = авто по скорости)',g.model)}${field('g_temp','Температура (0–2)',g.temperature,'number','step="0.1"')}</div>
+   <label>Инструкция</label><textarea id="g_prompt" style="min-height:150px">${esc(g.prompt)}</textarea>
+   <label>Проверка: вставь текст любого поста</label><textarea id="g_test" style="min-height:70px"></textarea><div class="row" style="margin-top:8px"><button onclick="testGem()">Сгенерировать комментарий</button><span id="g_out" class="mu"></span></div></div>
+  <div class="row" style="margin-top:16px"><button class="pri" onclick="saveSettings()">Сохранить всё</button></div>`}
+const gemForm=()=>({enabled:$('#g_en').checked,model:$('#g_model').value.trim(),temperature:+$('#g_temp').value,prompt:$('#g_prompt').value});
+async function testGem(){$('#g_out').textContent='Генерирую…';try{const r=await post('/gemini/test',{text:$('#g_test').value,gemini:gemForm()});$('#g_out').innerHTML='<b style="color:var(--tx)">'+esc(r.text)+'</b>'}catch(e){$('#g_out').innerHTML='<span class="bad">'+esc(e.message)+'</span>'}}
+async function saveSettings(){const P={days:num('#p_days'),zones:{},day_plan:{},channels_per_session:[num('#p_c0'),num('#p_c1')],react_ratio:num('#p_ratio'),skip_chance:num('#p_skip')/100,
+  profile_days:{},profile_zones:{},profile_gap_min:num('#p_gap'),funnel_days:num('#p_fun'),channel_pool:lines('#p_pool'),reactions:lines('#p_react')};
+  for(const z in ZN)P.zones[z]=[num(`#z_${z}0`),num(`#z_${z}1`)];
+  for(const k of ['1','2','default'])P.day_plan[k]={zones:num(`#d_${k}_z`),posts:[num(`#d_${k}_p0`),num(`#d_${k}_p1`)],react:$(`#d_${k}_r`).checked,max_react:num(`#d_${k}_mr`),comment:$(`#d_${k}_c`).checked};
+  for(const f in PF){P.profile_days[f]=num('#pd_'+f);P.profile_zones[f]=$('#pz_'+f).value}
+  const x=await run(()=>api('/settings',{method:'PUT',body:JSON.stringify({plan:P,gemini:gemForm()})}),'Сохранено');if(x){SET=x;draw()}}
+load();
+</script></body></html>
