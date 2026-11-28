@@ -8,6 +8,7 @@ import urllib.request
 import base64
 import hmac
 import json
+import math
 from pathlib import Path
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -24,6 +25,7 @@ from hub import Hub
 from memguard import memory_guard_cycle, rss_mb
 from supabase_db import supabase_headers
 import db_migrate
+import accounts_center
 from resources import ResourceSampler
 
 logging.basicConfig(
@@ -105,6 +107,102 @@ async def run_account(acc: PatrickAccount):
             backoff = min(backoff * 2, 600)
 
 
+# ---------------------------------------------------------------------------
+# Воронка: аккаунты, перенесённые из «Центра аккаунтов», подхватываются на лету (без редеплоя)
+# ---------------------------------------------------------------------------
+FUNNEL_MAX_ACCOUNTS = int(os.getenv("FUNNEL_MAX_ACCOUNTS", "5"))   # потолок по памяти Render (512 МБ)
+FUNNEL_SYNC_SEC = int(os.getenv("FUNNEL_SYNC_SEC", "60"))
+_funnel_warned: set = set()
+
+
+def _center_client(row):
+    """Центр не открывает вторую сессию аккаунта, который уже работает в воронке — берёт её клиента."""
+    cid = row["id"]
+    return next((a.client for a in accounts if a.center_id == cid and a.ready and not a.dead), None)
+
+
+def _funnel_status() -> dict:
+    return {
+        a.center_id: {"label": a.label, "number": a.number, "ready": bool(a.ready), "dead": a.dead}
+        for a in accounts if getattr(a, "center_id", None)
+    }
+
+
+async def _funnel_add(r: dict):
+    number = r["number"]
+    if r.get("proxy"):
+        os.environ[f"ACCOUNT_{number}_PROXY"] = r["proxy"]
+    else:
+        os.environ.pop(f"ACCOUNT_{number}_PROXY", None)
+    # «обычный прогрев» воронки: scheduler читает ACCOUNT_<N>_WARMUP_DAYS при создании аккаунта,
+    # отсчёт стартует при первом запуске в боте и сохраняется в БД (рестарты его не сбрасывают)
+    until = r.get("funnel_warmup_until")
+    os.environ.pop(f"ACCOUNT_{number}_WARMUP_DAYS", None)
+    if until and until > datetime.now(timezone.utc):
+        days = max(1, math.ceil((until - datetime.now(timezone.utc)).total_seconds() / 86400))
+        os.environ[f"ACCOUNT_{number}_WARMUP_DAYS"] = str(days)
+        os.environ[f"ACCOUNT_{number}_WARMUP_MODE"] = "normal"
+    acc = PatrickAccount(
+        f"Аккаунт {number}", r["session"], index=min(len(accounts), 6),
+        api_id=r.get("api_id"), api_hash=r.get("api_hash"), device=r.get("device"),
+        lang=r.get("lang"), center_id=r["id"],
+    )
+    accounts.append(acc)
+    hub.register(acc)
+    acc._run_task = asyncio.create_task(run_account(acc))
+    logger.info("🔀 Воронка: аккаунт центра #%s запускается как «%s»", r["id"], acc.label)
+
+
+async def _funnel_remove(acc):
+    logger.info("🔀 Воронка: аккаунт «%s» выведен из воронки — останавливаю", acc.label)
+    task = getattr(acc, "_run_task", None)
+    if task and not task.done():
+        task.cancel()
+    try:
+        await acc.stop()
+    except Exception as e:
+        logger.warning("Ошибка остановки %s: %s", acc.label, e)
+    if acc in accounts:
+        accounts.remove(acc)
+    if acc in hub.accounts:
+        hub.accounts.remove(acc)
+
+
+async def funnel_sync_loop():
+    await asyncio.sleep(25)
+    while True:
+        try:
+            if accounts_center.ready():
+                rows = await accounts_center.funnel_accounts()
+                wanted = {r["id"] for r in rows}
+                for acc in [a for a in accounts if a.center_id and a.center_id not in wanted]:
+                    await _funnel_remove(acc)
+                have = {a.center_id for a in accounts if a.center_id}
+                env_tg_ids = {a.me.id for a in accounts if not a.center_id and a.me}
+                for r in rows:
+                    if r["id"] in have:
+                        continue
+                    if r.get("tg_id") in env_tg_ids:
+                        if r["id"] not in _funnel_warned:
+                            _funnel_warned.add(r["id"])
+                            logger.warning("🔀 Воронка: аккаунт центра #%s — тот же Telegram-аккаунт, что уже запущен "
+                                           "из переменной сессии; второй запуск пропущен (иначе AuthKeyDuplicated)", r["id"])
+                        continue
+                    if len(have) >= FUNNEL_MAX_ACCOUNTS:
+                        if "max" not in _funnel_warned:
+                            _funnel_warned.add("max")
+                            logger.warning("🔀 Воронка: достигнут потолок FUNNEL_MAX_ACCOUNTS=%d — остальные ждут", FUNNEL_MAX_ACCOUNTS)
+                        break
+                    await _funnel_add(r)
+                    have.add(r["id"])
+                    await asyncio.sleep(random.uniform(5, 15))     # не поднимаем сразу пачку
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.exception("Воронка: ошибка синхронизации: %s", e)
+        await asyncio.sleep(FUNNEL_SYNC_SEC)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global accounts
@@ -132,12 +230,16 @@ async def lifespan(app: FastAPI):
         logger.error("DB: автонастройка не выполнена: %s", e)
     _background_tasks.append(asyncio.create_task(db_migrate.maintenance_loop()))
 
+    # Центр аккаунтов (свои таблицы center_*). Его сбой не должен мешать боту.
+    accounts_center.CLIENT_PROVIDER = _center_client
+    accounts_center.FUNNEL_STATUS = _funnel_status
+    try:
+        await asyncio.wait_for(accounts_center.start(), timeout=60)
+    except Exception as e:
+        logger.error("Центр аккаунтов: не запущен: %s", e)
+
     if not sessions:
-        logger.warning("⚠️ Telegram sessions не найдены")
-        yield
-        for task in _background_tasks:
-            task.cancel()
-        return
+        logger.warning("⚠️ Telegram sessions в переменных не найдены (аккаунты воронки подхватятся из центра)")
 
     accounts = [
         PatrickAccount(label, session, index)
@@ -149,20 +251,25 @@ async def lifespan(app: FastAPI):
     # HTTP-сервер поднимается сразу (Render ждёт открытый порт), аккаунты
     # стартуют в фоне, каждый в своей задаче и со своим сдвигом.
     for acc in accounts:
-        _background_tasks.append(asyncio.create_task(run_account(acc)))
+        acc._run_task = asyncio.create_task(run_account(acc))
     _background_tasks.append(asyncio.create_task(keep_alive_cycle()))
     _background_tasks.append(asyncio.create_task(memory_guard_cycle()))
+    _background_tasks.append(asyncio.create_task(funnel_sync_loop()))
 
     yield
 
     for task in _background_tasks:
         task.cancel()
 
-    for acc in accounts:
+    for acc in list(accounts):
         try:
             await acc.stop()
         except Exception as e:
             logger.warning("Ошибка остановки %s: %s", acc.label, e)
+    try:
+        await accounts_center.stop()
+    except Exception:
+        pass
 
 
 app = FastAPI(lifespan=lifespan)
@@ -175,6 +282,7 @@ async def health():
         "status": "ok",
         "accounts": len(accounts),
         "ready": [acc.label for acc in accounts if acc.ready],
+        "center": accounts_center.ready(),
         "rss_mb": round(rss_mb()),
     }
 
@@ -239,6 +347,9 @@ def check_admin_auth(
                     'Basic realm="Patrick Hunter Admin"'
             },
         )
+
+
+accounts_center.setup(app, check_admin_auth)   # /accounts и /api/accounts/*
 
 
 async def supabase_get(
