@@ -518,14 +518,6 @@ function setupVisualLayer() {
         if (raf) return;
         raf = requestAnimationFrame(() => {
             raf = 0;
-            document.documentElement.style.setProperty("--gx", e.clientX + "px");
-            document.documentElement.style.setProperty("--gy", e.clientY + "px");
-            const sp = e.target.closest && e.target.closest(".spot");
-            if (sp) {
-                const r = sp.getBoundingClientRect();
-                sp.style.setProperty("--mx", (e.clientX - r.left) + "px");
-                sp.style.setProperty("--my", (e.clientY - r.top) + "px");
-            }
             const t = e.target.closest && e.target.closest("[data-tip]");
             if (t) {
                 const p = t.dataset.tip.split("|");
@@ -770,6 +762,7 @@ async function loadDashboard() {
         // сначала показываем контент: графики меряют ширину контейнеров
         showContent();
         renderAll();
+        loadAccountsInfo().then(() => { renderAccounts(); renderAccountsTable(); });
 
         $("last-update").textContent =
             `Обновлено: ${new Date().toLocaleTimeString("ru-RU")}`;
@@ -922,133 +915,7 @@ async function checkProxies(accountNumber) {
     }
 }
 
-function renderAccounts() {
-    const container = $("accounts-preview");
-    const accounts = dashboardData.accounts || [];
 
-    if (!accounts.length) {
-        container.innerHTML =
-            `<div class="empty">Аккаунтов нет</div>`;
-        return;
-    }
-
-    container.innerHTML = accounts.map(account => {
-
-        const online = account.connected === true;
-
-        const name =
-            account.name ||
-            `Аккаунт ${account.account_number}`;
-
-        return `
-            <div class="account-row">
-
-                <div class="account-info">
-
-                    <div class="account-number">
-                        #${escapeHtml(account.account_number)}
-                    </div>
-
-                    <div class="account-name">
-                        ${escapeHtml(name)}
-                    </div>
-
-                </div>
-
-                <div class="account-status ${online ? "online" : "offline"}">
-
-                    <span class="account-status-dot"></span>
-
-                    ${online ? "Онлайн" : "Оффлайн"}
-
-                    ${proxyBadge(account.proxy)}
-
-                </div>
-
-            </div>
-        `;
-    }).join("");
-}
-
-function renderAccountsTable() {
-    const tbody = $("accounts-table");
-    const accounts = dashboardData.accounts || [];
-
-    if (!accounts.length) {
-        tbody.innerHTML = `
-            <tr>
-                <td colspan="7">
-                    <div class="empty">
-                        Аккаунтов нет
-                    </div>
-                </td>
-            </tr>
-        `;
-
-        return;
-    }
-
-    tbody.innerHTML = accounts.map(account => {
-
-        const online =
-            account.connected === true;
-
-        return `
-            <tr>
-
-                <td>
-                    #${escapeHtml(account.account_number)}
-                </td>
-
-                <td>
-                    ${escapeHtml(
-                        account.name || "Без имени"
-                    )}
-                </td>
-
-                <td>
-                    <span class="badge ${
-                        online
-                            ? "online"
-                            : "offline"
-                    }">
-                        ${online ? "Онлайн" : "Оффлайн"}
-                    </span>
-                </td>
-
-                <td>
-                    ${proxyAddress(account.proxy)}
-                </td>
-
-                <td>
-                    ${proxyBadge(account.proxy)}
-                    ${proxyDetails(account.proxy)}
-                    <button class="kn-btn proxy-btn"
-                        data-proxy-check="${escapeHtml(account.account_number)}">Проверить</button>
-                </td>
-
-                <td>
-                    ${formatDate(
-                        account.last_connected_at
-                    )}
-                </td>
-
-                <td>
-                    ${formatDate(
-                        account.updated_at
-                    )}
-                </td>
-
-            </tr>
-        `;
-    }).join("");
-
-    tbody.querySelectorAll("[data-proxy-check]").forEach(b => {
-        b.onclick = () => checkProxies(Number(b.dataset.proxyCheck));
-    });
-    const all = $("proxy-check-all");
-    if (all) all.onclick = () => checkProxies(0);
-}
 
 function renderActivity() {
     const clicks = dashboardData.clicks || [];
@@ -1391,8 +1258,11 @@ function setupNavigation() {
                 if (section === "learning") {
                     loadKnowledge();
                 }
+                if (section === "accounts") {
+                    loadAccountsInfo().then(() => renderAccountsTable());
+                }
                 if (section === "control") {
-                    loadControl();
+                    loadControl(true);
                 }
                 if (section === "resources") {
                     loadResources();
@@ -1537,53 +1407,497 @@ function fmtRel(iso) {
     return diff >= 0 ? `через ${span} (${at})` : `${span} назад (${at})`;
 }
 
-async function loadControl() {
+async function loadControl(force) {
     try {
-        const r = await fetch("/api/admin/jobs", { credentials: "same-origin", cache: "no-store" });
+        const [r] = await Promise.all([
+            fetch("/api/admin/jobs", { credentials: "same-origin", cache: "no-store" }),
+            loadAccountsInfo()
+        ]);
         if (!r.ok) throw new Error("HTTP " + r.status);
         const data = await r.json();
-        $("ctl-status").textContent = data.accounts.length ? "" : "Аккаунты ещё не запущены.";
-        $("ctl-list").innerHTML = data.accounts.map(a => {
-            const jobs = Object.entries(a.jobs).map(([job, s]) => {
-                const title = (data.titles || {})[job] || job;
-                const plan = job === "clicker" && s.plan && s.plan.total
-                    ? ` · план дня ${s.plan.done}/${s.plan.total}` : "";
-                const st = s.running ? pill("run", "выполняется")
-                    : (s.status === "error" ? pill("bad", "ошибка")
-                        : (s.status ? pill("ok", "ок") : pill("idle", "—")));
-                const btn = job === "clicker" ? "Сделать клик"
-                    : job === "tasks" ? "Сделать задания"
-                    : job === "daily" ? "Забрать ежедневку" : "Запустить обход";
-                return `<div class="ctl-job">
-                    <div class="ctl-job-head"><b>${escapeHtml(title)}</b><span>${st}</span></div>
-                    <div class="ctl-line">Следующий запуск: ${escapeHtml(fmtRel(s.next))}${plan}</div>
-                    <div class="ctl-line">Последний: ${escapeHtml(fmtRel(s.last))}${s.message ? " — " + escapeHtml(s.message) : ""}</div>
-                    <button class="kn-btn kn-primary" data-acc="${a.account}" data-job="${job}"
-                        ${(!a.ready || s.running || !s.manual) ? "disabled" : ""}>${btn}</button>
-                </div>`;
-            }).join("");
-            const dead = a.dead
-                ? `<div class="wd-warm dead">${ico("x", "")}Аккаунт остановлен: ${escapeHtml(a.dead)}. Нужна новая сессия (вкладка «Генерация сессии») — после замены TELEGRAM_SESSION_${a.account} на Render аккаунт запустится заново.</div>` : "";
-            return `<div class="ctl-acc"><h3>${escapeHtml(a.label)} ${a.ready ? "" : (a.dead ? "" : "<i>(запускается…)</i>")}</h3>${dead}
-                <div class="ctl-jobs">${routePanel(a)}${warmupPanel(a)}${protectionPanel(a)}</div>
-                <div class="ctl-jobs" style="margin-top:10px">${jobs}</div>
-                <button class="kn-btn" data-probe="${a.account}" ${a.ready ? "" : "disabled"}
-                    title="Нажимает минимальную сумму вывода только если бот гарантированно откажет">Проба вывода (безопасно)</button></div>`;
-        }).join("");
-        document.querySelectorAll("#ctl-list button[data-job]").forEach(b => b.onclick = () => runJob(b));
-        document.querySelectorAll("#ctl-list button[data-probe]").forEach(b => b.onclick = () => probeWithdraw(b));
-        bindControlPanels();
+        ctlData = data;
+        $("ctl-status").textContent = (data.accounts || []).length ? "" : "Аккаунты ещё не запущены.";
+
+        // не перерисовываем, если ничего не изменилось (иначе лагает и сбивает ввод)
+        const sig = JSON.stringify(data) + "|" + Math.floor(Date.now() / 60000) + "|" +
+            JSON.stringify(Object.values(accInfo).map(i => [i.balance, i.floods_1h, i.floods_24h,
+                i.withdrawn_stars, i.has_avatar, i.username, i.ready, i.referral_link]));
+        if (force || sig !== ctlSig) {
+            ctlSig = sig;
+            renderControl();
+        }
     } catch (e) {
         $("ctl-status").textContent = "Не удалось загрузить: " + e.message;
     }
     if (!ctlTimer) {
         ctlTimer = setInterval(() => {
             const ae = document.activeElement;
-            const typing = ae && ae.tagName === "INPUT" && ae.closest && ae.closest("#ctl-list");
-            if (!typing && document.getElementById("section-control").classList.contains("active")) loadControl();
+            const typing = ae && /^(INPUT|SELECT|TEXTAREA)$/.test(ae.tagName) &&
+                ae.closest && ae.closest("#section-control");
+            if (document.hidden || typing) return;
+            if (document.getElementById("section-control").classList.contains("active")) loadControl();
+            else if (document.getElementById("section-accounts").classList.contains("active")) {
+                loadAccountsInfo().then(() => renderAccountsTable());
+            }
         }, 15000);
     }
 }
+
+/* =====================================================================
+   АККАУНТЫ: данные и помощники
+   ===================================================================== */
+
+let accInfo = {};          // номер аккаунта -> живые данные из /api/admin/accounts-info
+let ctlData = null;        // ответ /api/admin/jobs
+let ctlSel = null;         // выбранный аккаунт
+let ctlTab = "sched";      // выбранная вкладка карточки
+let showHiddenAcc = false; // показывать ли скрытые аккаунты
+let ctlSig = "";
+
+function hiddenAccs() {
+    try { return new Set(JSON.parse(localStorage.getItem("ph-hidden-acc") || "[]").map(Number)); }
+    catch (_) { return new Set(); }
+}
+
+function setAccHidden(n, on) {
+    const s = hiddenAccs();
+    if (on) s.add(Number(n)); else s.delete(Number(n));
+    try { localStorage.setItem("ph-hidden-acc", JSON.stringify([...s])); } catch (_) {}
+}
+
+async function loadAccountsInfo() {
+    try {
+        const r = await fetch("/api/admin/accounts-info", { credentials: "same-origin", cache: "no-store" });
+        if (!r.ok) return false;
+        const d = await r.json();
+        const next = {};
+        (d.accounts || []).forEach(a => { next[Number(a.account)] = a; });
+        accInfo = next;
+        return true;
+    } catch (_) {
+        return false;
+    }
+}
+
+function accNick(n) {
+    const i = accInfo[n];
+    return i && i.username ? "@" + i.username : "";
+}
+
+function accFullName(n) {
+    const i = accInfo[n];
+    return i ? [i.first_name, i.last_name].filter(Boolean).join(" ") : "";
+}
+
+function avatarHtml(n, name, size) {
+    const i = accInfo[n];
+    const ch = String(accFullName(n) || name || "?").trim().charAt(0).toUpperCase() || "?";
+    const img = i && i.has_avatar
+        ? `<img src="/api/admin/account-avatar?account=${Number(n)}" alt="" loading="lazy" onerror="this.remove()">` : "";
+    return `<span class="av av-${size}"><b>${escapeHtml(ch)}</b>${img}</span>`;
+}
+
+function statusOf(dead, ready, connected) {
+    if (dead) return { cls: "bad", dot: "bad", text: "Остановлен" };
+    if (ready === false) return { cls: "warn", dot: "warn", text: "Запускается" };
+    if (connected === false) return { cls: "off", dot: "off", text: "Оффлайн" };
+    return { cls: "ok", dot: "on", text: "Онлайн" };
+}
+
+function statusPill(st) {
+    return `<span class="spill ${st.cls}"><i></i>${st.text}</span>`;
+}
+
+function copyText(text, btn) {
+    const done = () => {
+        if (!btn) return;
+        const old = btn.dataset.old || btn.textContent;
+        btn.dataset.old = old;
+        btn.textContent = "Скопировано";
+        setTimeout(() => { btn.textContent = old; }, 1400);
+    };
+    if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(text).then(done, () => {});
+        return;
+    }
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand("copy"); done(); } catch (_) {}
+    ta.remove();
+}
+
+function openAccount(n, tab) {
+    ctlSel = Number(n);
+    if (tab) ctlTab = tab;
+    const btn = document.querySelector('.nav-item[data-section="control"]');
+    if (btn) btn.click();
+}
+
+function kv(label, value, sub) {
+    return `<div class="kv"><i>${escapeHtml(label)}</i><b>${value}</b>${sub ? `<span>${sub}</span>` : ""}</div>`;
+}
+
+function hiddenToggleHtml(count) {
+    if (!count && !showHiddenAcc) return "";
+    return `<button class="acc-chip ghost" data-toggle-hidden>${showHiddenAcc ? "Прятать скрытые" : `Скрытые (${count})`}</button>`;
+}
+
+/* =====================================================================
+   СТРАНИЦА «АККАУНТЫ»: карточки всех аккаунтов
+   ===================================================================== */
+
+function renderAccounts() {
+    const container = $("accounts-preview");
+    const hid = hiddenAccs();
+    const accounts = (dashboardData.accounts || [])
+        .filter(a => showHiddenAcc || !hid.has(Number(a.account_number)));
+
+    if (!accounts.length) {
+        container.innerHTML = `<div class="empty">Аккаунтов нет</div>`;
+        return;
+    }
+
+    container.innerHTML = accounts.map(account => {
+        const n = Number(account.account_number);
+        const info = accInfo[n] || {};
+        const st = statusOf(info.dead, info.ready, account.connected === true);
+        const name = account.name || `Аккаунт ${n}`;
+        return `
+            <div class="account-row" data-open-acc="${n}" style="cursor:pointer">
+                <div class="account-info">
+                    ${avatarHtml(n, name, 32)}
+                    <div class="account-name">${escapeHtml(name)}</div>
+                </div>
+                <div class="account-status ${st.cls === "ok" ? "online" : "offline"}">
+                    ${statusPill(st)}
+                    ${proxyBadge(account.proxy)}
+                </div>
+            </div>`;
+    }).join("");
+
+    container.querySelectorAll("[data-open-acc]").forEach(el => {
+        el.onclick = () => openAccount(el.dataset.openAcc);
+    });
+}
+
+function renderAccountsTable() {
+    const box = $("accounts-grid");
+    if (!box || !dashboardData) return;
+
+    const hid = hiddenAccs();
+    const all = dashboardData.accounts || [];
+    const hiddenCount = all.filter(a => hid.has(Number(a.account_number))).length;
+    const list = all.filter(a => showHiddenAcc || !hid.has(Number(a.account_number)));
+
+    const tg = $("acc-toggle-hidden");
+    if (tg) {
+        tg.classList.toggle("hidden", !hiddenCount && !showHiddenAcc);
+        tg.textContent = showHiddenAcc ? "Прятать скрытые" : `Скрытые (${hiddenCount})`;
+        tg.onclick = () => { showHiddenAcc = !showHiddenAcc; renderAccountsTable(); renderAccounts(); };
+    }
+    const all2 = $("proxy-check-all");
+    if (all2) all2.onclick = () => checkProxies(0);
+
+    if (!list.length) {
+        box.innerHTML = `<div class="empty">${all.length ? "Все аккаунты скрыты" : "Аккаунтов нет"}</div>`;
+        return;
+    }
+
+    box.innerHTML = list.map(account => {
+        const n = Number(account.account_number);
+        const i = accInfo[n] || {};
+        const isHidden = hid.has(n);
+        const st = statusOf(i.dead, i.ready, account.connected === true);
+        const name = account.name || `Аккаунт ${n}`;
+        const nick = accNick(n);
+        const sub = [accFullName(n), nick, i.tg_id ? "ID " + i.tg_id : ""].filter(Boolean).join(" · ");
+        const flood = i.floods_24h != null ? String(i.floods_24h) : "—";
+        const out = i.withdrawn_stars != null ? formatStars(i.withdrawn_stars) + " ★" : "—";
+        const bal = i.balance != null && i.ready ? formatStars(i.balance) + " ★" : "—";
+        const p = account.proxy || {};
+        return `
+        <article class="mini ${i.dead ? "is-dead" : ""} ${isHidden ? "is-hidden" : ""}">
+            <div class="mini-top">
+                ${avatarHtml(n, name, 44)}
+                <div class="mini-id">
+                    <b>${escapeHtml(name)}</b>
+                    <span>${escapeHtml(sub || "данные появятся после запуска")}</span>
+                </div>
+                ${statusPill(st)}
+            </div>
+            ${i.dead ? `<div class="mini-dead">${ico("x", "")}${escapeHtml(i.dead)}</div>` : ""}
+            <div class="mini-stats">
+                <div><i>Баланс</i><b>${bal}</b></div>
+                <div><i>FloodWait 24ч</i><b>${flood}</b></div>
+                <div><i>Выведено</i><b>${out}</b></div>
+            </div>
+            <div class="mini-line">
+                ${proxyBadge(p)}
+                <span>${p.route === "proxy" ? "через прокси" : "напрямую (Render)"}${p.latency_ms != null ? " · " + p.latency_ms + " мс" : ""}</span>
+            </div>
+            <div class="mini-actions">
+                <button class="kn-btn kn-primary" data-open-acc="${n}">Управлять</button>
+                <button class="kn-btn" data-proxy-check="${n}">Проверить прокси</button>
+                <button class="kn-btn" data-hide-acc="${n}" data-on="${isHidden ? 0 : 1}">${isHidden ? "Показать" : "Скрыть"}</button>
+            </div>
+        </article>`;
+    }).join("");
+
+    box.querySelectorAll("[data-open-acc]").forEach(b => b.onclick = () => openAccount(b.dataset.openAcc));
+    box.querySelectorAll("[data-proxy-check]").forEach(b => b.onclick = () => checkProxies(Number(b.dataset.proxyCheck)));
+    box.querySelectorAll("[data-hide-acc]").forEach(b => b.onclick = () => {
+        setAccHidden(b.dataset.hideAcc, b.dataset.on === "1");
+        renderAccountsTable();
+        renderAccounts();
+    });
+}
+
+/* =====================================================================
+   СТРАНИЦА «УПРАВЛЕНИЕ»: выбрал аккаунт → вкладка → настройка
+   ===================================================================== */
+
+const CTL_TABS = [
+    ["sched", "Расписание"],
+    ["proxy", "Прокси"],
+    ["warm", "Прогрев"],
+    ["prot", "Защита"],
+    ["wd", "Вывод"],
+];
+
+function renderControl() {
+    const d = ctlData;
+    const sw = $("acc-switch");
+    const list = $("ctl-list");
+    if (!d || !sw || !list) return;
+
+    const hid = hiddenAccs();
+    const all = d.accounts || [];
+    const vis = all.filter(a => showHiddenAcc || !hid.has(a.account));
+    const hiddenCount = all.filter(a => hid.has(a.account)).length;
+
+    if (!vis.find(a => a.account === ctlSel)) ctlSel = vis.length ? vis[0].account : null;
+
+    sw.innerHTML = vis.map(a => {
+        const st = statusOf(a.dead, a.ready, true);
+        const name = a.label;
+        const nick = accNick(a.account);
+        return `<button class="acc-chip ${a.account === ctlSel ? "active" : ""} ${a.dead ? "dead" : ""}" data-sel="${a.account}">
+            ${avatarHtml(a.account, name, 28)}
+            <span><b>${escapeHtml(name)}</b><em>${escapeHtml(nick || st.text)}</em></span>
+            <i class="sdot ${st.dot}"></i>
+        </button>`;
+    }).join("") + hiddenToggleHtml(hiddenCount);
+
+    const a = vis.find(x => x.account === ctlSel);
+    list.innerHTML = a
+        ? accountCard(a, d.titles || {})
+        : `<div class="panel"><div class="empty">${all.length ? "Все аккаунты скрыты" : "Аккаунты ещё не запущены"}</div></div>`;
+
+    bindControlUI();
+}
+
+function accountCard(a, titles) {
+    const n = a.account;
+    const i = accInfo[n] || {};
+    const p = a.protection || {};
+    const w = a.warmup || {};
+    const px = a.proxy || {};
+    const st = statusOf(a.dead, a.ready, true);
+    const full = accFullName(n);
+    const nick = accNick(n);
+    const isHidden = hiddenAccs().has(n);
+
+    // Запущен
+    let started = "—", startedSub = "";
+    if (i.started_at) {
+        started = escapeHtml(formatDate(i.started_at));
+        const up = (Date.now() - new Date(i.started_at).getTime()) / 1000;
+        if (up > 0 && a.ready) startedSub = "работает " + fmtSec(up);
+    } else if (!a.ready && !a.dead) {
+        startedSub = "запускается…";
+    }
+
+    // FloodWait
+    const f24 = p.floods_24h != null ? p.floods_24h : i.floods_24h;
+    const f1 = p.floods_1h != null ? p.floods_1h : i.floods_1h;
+    let floodSub = f1 != null ? `за час: ${f1}` : "";
+    const lf = p.last_flood;
+    if (lf) {
+        const ago = i.last_flood && i.last_flood.ago_sec != null ? `, ${fmtSec(i.last_flood.ago_sec)} назад` : "";
+        floodSub += ` · последний ${lf.sec} с${ago}`;
+    } else if (f24 != null) {
+        floodSub += " · не было";
+    }
+
+    const wLabel = w.enabled && w.active ? `день ${w.day}/${w.days}` : (w.enabled ? "завершён" : "выключен");
+    const wSub = w.enabled && w.active ? (w.mode === "ultra" ? "ультра" : "обычный") + ` · ${Math.round((w.factor || 0) * 100)}% нагрузки` : "полная нагрузка";
+
+    const cells = [
+        kv("Запущен", started, escapeHtml(startedSub)),
+        kv("Баланс", i.balance != null && a.ready ? formatStars(i.balance) + " ★" : "—",
+            i.friends != null ? `друзей ${i.friends}${typeof i.activated === "number" ? ` · активировали ${i.activated}` : ""}` : ""),
+        kv("Выведено", i.withdrawn_stars != null ? formatStars(i.withdrawn_stars) + " ★" : "—",
+            i.withdrawn_count != null ? `выводов: ${i.withdrawn_count}` : "нет данных"),
+        kv("FloodWait / 24ч", f24 != null ? String(f24) : "—", escapeHtml(floodSub)),
+        kv("Маршрут", px.route === "proxy" ? "Прокси" : "Напрямую",
+            escapeHtml(PROXY_LABELS[px.status || "unknown"] + (px.latency_ms != null ? " · " + px.latency_ms + " мс" : ""))),
+        kv("Прогрев", escapeHtml(wLabel), escapeHtml(wSub)),
+        kv("Защита", escapeHtml(p.state_title || "—"),
+            p.cooldown_left > 0 ? "КД ещё " + fmtSec(p.cooldown_left) : "ограничений нет"),
+        kv("Telegram ID", i.tg_id ? String(i.tg_id) : "—", nick ? escapeHtml(nick) : ""),
+    ].join("");
+
+    const ref = i.referral_link
+        ? `<div class="refrow"><label>Реф. ссылка</label>
+              <input readonly value="${escapeHtml(i.referral_link)}" onfocus="this.select()">
+              <button class="kn-btn" data-copy="${escapeHtml(i.referral_link)}">Копировать</button></div>`
+        : `<div class="refrow"><label>Реф. ссылка</label><span class="muted">появится после запуска аккаунта</span></div>`;
+
+    const dead = a.dead
+        ? `<div class="banner bad">${ico("x", "")}<div><b>Аккаунт остановлен:</b> ${escapeHtml(a.dead)}.
+            Нужна новая сессия (вкладка «Сессия»), после замены TELEGRAM_SESSION_${n} на Render аккаунт запустится заново.
+            Мёртвый аккаунт можно скрыть с экрана кнопкой справа.</div></div>` : "";
+
+    const tabs = CTL_TABS.map(([k, t]) =>
+        `<button class="tab ${k === ctlTab ? "active" : ""}" data-tab="${k}">${t}</button>`).join("");
+
+    let body = "";
+    if (ctlTab === "sched") body = schedPanel(a, titles);
+    else if (ctlTab === "proxy") body = routePanel(a);
+    else if (ctlTab === "warm") body = warmupPanel(a);
+    else if (ctlTab === "prot") body = protectionPanel(a);
+    else body = withdrawPanel(a);
+
+    return `<div class="acc-card">
+        <div class="acc-head">
+            ${avatarHtml(n, a.label, 72)}
+            <div class="acc-title">
+                <h2>${escapeHtml(a.label)}</h2>
+                <div class="acc-sub">
+                    ${full ? `<span><b>${escapeHtml(full)}</b></span>` : ""}
+                    ${nick ? `<span>${escapeHtml(nick)}</span>` : `<span>ник не задан</span>`}
+                    ${i.tg_id ? `<span>ID <b>${i.tg_id}</b></span>` : ""}
+                </div>
+            </div>
+            <div class="acc-head-right">
+                ${statusPill(st)}
+                <button class="kn-btn" data-hide-acc="${n}" data-on="${isHidden ? 0 : 1}"
+                    title="Скрывает аккаунт с экрана в этом браузере. Сам аккаунт не затрагивается.">${isHidden ? "Показать" : "Скрыть"}</button>
+            </div>
+        </div>
+        ${dead}
+        <div class="kv-grid">${cells}</div>
+        ${timelineHtml(n, i, a)}
+        ${ref}
+        <div class="tabs">${tabs}</div>
+        <div class="tab-body">${body}</div>
+    </div>`;
+}
+
+function bindControlUI() {
+    document.querySelectorAll("#acc-switch [data-sel]").forEach(b => b.onclick = () => {
+        ctlSel = Number(b.dataset.sel);
+        renderControl();
+    });
+    document.querySelectorAll("#acc-switch [data-toggle-hidden]").forEach(b => b.onclick = () => {
+        showHiddenAcc = !showHiddenAcc;
+        renderControl();
+    });
+    document.querySelectorAll("#ctl-list [data-tab]").forEach(b => b.onclick = () => {
+        ctlTab = b.dataset.tab;
+        renderControl();
+    });
+    document.querySelectorAll("#ctl-list [data-copy]").forEach(b => b.onclick = () => copyText(b.dataset.copy, b));
+    document.querySelectorAll("#ctl-list [data-hide-acc]").forEach(b => b.onclick = () => {
+        setAccHidden(b.dataset.hideAcc, b.dataset.on === "1");
+        if (b.dataset.on === "1") ctlSel = null;
+        renderControl();
+        renderAccounts();
+        renderAccountsTable();
+    });
+    document.querySelectorAll("#ctl-list [data-wm]").forEach(el => el.onclick = () => {
+        const n = el.dataset.n;
+        $(`wmode-${n}`).value = el.dataset.wm;
+        document.querySelectorAll(`#ctl-list [data-wm][data-n="${n}"]`)
+            .forEach(x => x.classList.toggle("active", x === el));
+        const days = $(`wdays-${n}`);
+        if (days) days.max = el.dataset.wm === "ultra" ? 90 : 60;
+    });
+    document.querySelectorAll("#ctl-list [data-goto-wd]").forEach(b => b.onclick = () => {
+        const btn = document.querySelector('.nav-item[data-section="withdraw"]');
+        if (btn) btn.click();
+    });
+    document.querySelectorAll("#ctl-list button[data-job]").forEach(b => b.onclick = () => runJob(b));
+    document.querySelectorAll("#ctl-list button[data-probe]").forEach(b => b.onclick = () => probeWithdraw(b));
+    bindControlPanels();
+}
+
+
+/* ===== Хронология аккаунта: живой отсчёт + ручные даты (хранятся в этом браузере) ===== */
+function accMeta(n) {
+    try { return (JSON.parse(localStorage.getItem("ph-acc-meta") || "{}"))[n] || {}; } catch (e) { return {}; }
+}
+function setAccMeta(n, key, val) {
+    try {
+        const all = JSON.parse(localStorage.getItem("ph-acc-meta") || "{}");
+        all[n] = all[n] || {};
+        if (val === "" || val == null) delete all[n][key]; else all[n][key] = val;
+        localStorage.setItem("ph-acc-meta", JSON.stringify(all));
+    } catch (e) {}
+}
+function fmtClock(sec) {
+    sec = Math.max(0, Math.floor(sec));
+    const d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600),
+          m = Math.floor(sec % 3600 / 60), s = sec % 60, z = x => String(x).padStart(2, "0");
+    return (d ? d + " д " : "") + z(h) + ":" + z(m) + ":" + z(s);
+}
+function timelineHtml(n, i, a) {
+    const m = accMeta(n);
+    const startMs = i.started_at ? new Date(i.started_at).getTime() : 0;
+    const live = startMs && a.ready;
+    const prior = Number(m.worked_days || 0) * 86400;
+    const addedDef = i.added_at ? String(i.added_at).slice(0, 10) : "";
+    return `<div class="timeline" data-acc="${n}">
+        <div class="tl-cell"><i>Запущен (отсчёт)</i>
+            <b class="tl-live" ${live ? `data-up="${startMs}"` : ""}>${live ? fmtClock((Date.now() - startMs) / 1000) : "не запущен"}</b>
+            <span>${startMs ? "с " + escapeHtml(formatDate(i.started_at)) : "время запуска появится после старта"}</span></div>
+        <div class="tl-cell"><i>Проработал всего</i>
+            <b class="tl-live" ${live ? `data-up="${startMs}"` : ""} data-off="${prior}">${fmtClock(prior + (live ? (Date.now() - startMs) / 1000 : 0))}</b>
+            <span class="tl-inp">до запуска, дней: <input type="number" min="0" step="1" data-meta="worked_days" value="${escapeHtml(m.worked_days || "")}" placeholder="0"></span></div>
+        <div class="tl-cell"><i>Добавлен</i>
+            <input type="date" data-meta="added" value="${escapeHtml(m.added || addedDef)}">
+            <span>дата добавления в воронку</span></div>
+        <div class="tl-cell"><i>Регистрация аккаунта</i>
+            <input type="date" data-meta="reg" value="${escapeHtml(m.reg || "")}">
+            <span class="tl-age" data-reg="${escapeHtml(m.reg || "")}">${regAge(m.reg)}</span></div>
+    </div>`;
+}
+function regAge(d) {
+    if (!d) return "укажите вручную";
+    const days = Math.floor((Date.now() - new Date(d).getTime()) / 86400000);
+    return days >= 0 ? `аккаунту ${days} дн.` : "дата в будущем";
+}
+document.addEventListener("change", e => {
+    const t = e.target;
+    if (!t.dataset || !t.dataset.meta) return;
+    const n = t.closest(".timeline").dataset.acc;
+    setAccMeta(n, t.dataset.meta, t.value);
+    if (t.dataset.meta === "reg") t.closest(".timeline").querySelector(".tl-age").textContent = regAge(t.value);
+    if (t.dataset.meta === "worked_days") {
+        const el = t.closest(".timeline").querySelectorAll("[data-off]")[0];
+        if (el) el.dataset.off = Number(t.value || 0) * 86400;
+    }
+});
+setInterval(() => {
+    if (document.hidden) return;
+    document.querySelectorAll(".tl-live[data-up]").forEach(el => {
+        el.textContent = fmtClock(Number(el.dataset.off || 0) + (Date.now() - Number(el.dataset.up)) / 1000);
+    });
+}, 1000);
 
 async function postJson(url, body) {
     const r = await fetch(url, {
@@ -1597,46 +1911,6 @@ async function postJson(url, body) {
     return data;
 }
 
-const MODE_TITLES = { auto: "Авто", on: "Только прокси", off: "Напрямую (Render)" };
-const MODE_HINTS = {
-    auto: "Идёт через прокси; если прокси не работает — сам переходит на IP Render и возвращается, когда прокси стабильно здоров 10 минут.",
-    on: "Только через прокси. Если прокси упадёт — аккаунт останется без связи (аварийного перехода нет).",
-    off: "Прокси выключен: аккаунт работает с IP Render, что бы ни случилось с прокси.",
-};
-
-function routePanel(a) {
-    const p = a.proxy || {};
-    const mode = p.mode || "auto";
-    const hasProxy = p.configured;
-    const routeTxt = p.route === "proxy"
-        ? `● через прокси${p.display ? " " + escapeHtml(p.display) : ""}${p.exit_ip ? " · IP " + escapeHtml(p.exit_ip) : ""}`
-        : p.route === "direct"
-            ? `◐ напрямую — IP Render${p.direct_ip ? " " + escapeHtml(p.direct_ip) : ""}`
-            : "—";
-    const src = p.url_source === "admin" ? "задан в админке" : p.url_source === "env" ? "из переменной ACCOUNT_N_PROXY" : "";
-    const st = hasProxy
-        ? `Прокси: ${proxyBadge(p)} ${proxyDetails(p)}${src ? `<div class="proxy-sub">${src}</div>` : ""}`
-        : `<div class="proxy-sub">Прокси не задан — аккаунт всегда с IP Render. Задайте адрес ниже, чтобы включить.</div>`;
-    const fo = p.failed_over
-        ? `<div class="wd-warm">${ico("alert", "")}Авария прокси: аккаунт временно на IP Render. Вернётся на прокси сам, когда тот проработает стабильно ${Math.round((p.failback_sec || 600) / 60)} мин.</div>` : "";
-    const ev = (p.events || []).slice().reverse().slice(0, 3)
-        .map(e => `<div class="proxy-sub">${escapeHtml(formatDate(e.at))} — ${escapeHtml(e.text)}</div>`).join("");
-    const btns = ["auto", "on", "off"].map(m =>
-        `<button class="kn-btn ${m === mode ? "kn-primary" : ""}" data-pmode="${m}" data-acc="${a.account}"
-            title="${escapeHtml(MODE_HINTS[m])}" ${(a.dead || (m !== "off" && !hasProxy)) ? "disabled" : ""}>${MODE_TITLES[m]}</button>`).join("");
-    return `<div class="ctl-job route-box">
-        <div class="ctl-job-head"><b>${ico("globe", "")}Маршрут в Telegram</b><span>${routeTxt}</span></div>
-        <div class="ctl-line">Режим: <b>${MODE_TITLES[mode]}</b> — ${escapeHtml(MODE_HINTS[mode])}</div>
-        ${st}${fo}${ev}
-        <div class="wd-mode">${btns}
-            <button class="kn-btn" data-pcheck="${a.account}">Проверить сейчас</button></div>
-        <div class="wd-mode">
-            <input class="wd-fid" type="text" id="purl-${a.account}" placeholder="socks5://user:pass@host:port" autocomplete="off">
-            <button class="kn-btn" data-purl="${a.account}" ${a.dead ? "disabled" : ""}>Сохранить прокси</button>
-            ${p.url_source === "admin" ? `<button class="kn-btn" data-purl-clear="${a.account}">Убрать (вернуть из env)</button>` : ""}
-        </div></div>`;
-}
-
 function fmtSec(sec) {
     sec = Math.max(0, Math.round(sec || 0));
     if (sec >= 86400) return `${Math.floor(sec / 86400)} дн ${Math.floor((sec % 86400) / 3600)} ч`;
@@ -1645,66 +1919,214 @@ function fmtSec(sec) {
     return `${sec} с`;
 }
 
-function protectionPanel(a) {
-    const p = a.protection;
-    if (!p) return "";
-    const icon = { ACTIVE: "●", COOLDOWN: "■", RECOVERING: "◐", OFFLINE: "○", AUTH_ERROR: "✕" }[p.state] || "•";
-    let lines = [`${icon} <b>${escapeHtml(p.state_title)}</b>`];
-    if (p.cooldown_left > 0) lines.push(`КД ещё ${fmtSec(p.cooldown_left)}`);
-    if (p.recovering_left > 0) lines.push(`восстановление ещё ${fmtSec(p.recovering_left)}`);
-    if (p.penalty_left > 0) lines.push(`штрафной режим ещё ${fmtSec(p.penalty_left)}`);
-    if (p.peer_flood) lines.push(ico("alert") + "был PeerFlood — проверьте @SpamBot");
-    const budgets = Object.values(p.budgets || {}).map(b =>
-        `${escapeHtml(b.title)} ${b.used}/${b.cap === null ? "∞" : b.cap}`).join(" · ");
-    const fl = p.last_flood
-        ? `последний FloodWait: ${p.last_flood.sec} с на «${escapeHtml(String(p.last_flood.action))}»` : "FloodWait не было";
-    return `<div class="ctl-job">
-        <div class="ctl-job-head"><b>${ico("shield", "")}Защита аккаунта</b></div>
-        <div class="ctl-line">${lines.join(" · ")}</div>
-        <div class="ctl-line">FloodWait: ${p.floods_1h} за час, ${p.floods_24h} за сутки · ${fl}</div>
-        <div class="ctl-line">Нагрузка ${Math.round(p.load_factor * 100)}% · замедление ×${p.slowdown} · паузы ×${p.pace}</div>
-        <div class="ctl-line">Бюджеты на сегодня: ${budgets}</div>
-        <button class="kn-btn" data-pclear="${a.account}" ${(p.cooldown_left || p.recovering_left || p.penalty_left) ? "" : "disabled"}>Сбросить КД/штраф</button>
+function lr(label, html) {
+    return `<div class="lr"><span>${escapeHtml(label)}</span><b>${html}</b></div>`;
+}
+
+/* ---------------- Расписание ---------------- */
+
+function schedPanel(a, titles) {
+    const jobs = Object.entries(a.jobs || {}).map(([job, s]) => {
+        const title = titles[job] || job;
+        const st = s.running ? pill("run", "выполняется")
+            : (s.status === "error" ? pill("bad", "ошибка")
+                : (s.status ? pill("ok", "ок") : pill("idle", "ещё не было")));
+        const btn = job === "clicker" ? "Сделать клик"
+            : job === "tasks" ? "Сделать задания"
+            : job === "daily" ? "Забрать ежедневку" : "Запустить обход";
+        let plan = "";
+        if (job === "clicker" && s.plan && s.plan.total) {
+            const pct = Math.min(100, Math.round(s.plan.done / s.plan.total * 100));
+            plan = `<div class="plan"><div class="pbar"><i style="width:${pct}%"></i></div>
+                <span>план дня ${s.plan.done}/${s.plan.total}</span></div>`;
+        }
+        return `<div class="job">
+            <div class="job-top"><b>${escapeHtml(title)}</b>${st}</div>
+            ${plan}
+            ${lr("Следующий", escapeHtml(fmtRel(s.next)))}
+            ${lr("Последний", escapeHtml(fmtRel(s.last)))}
+            ${s.message ? `<div class="job-msg">${escapeHtml(s.message)}</div>` : ""}
+            <button class="kn-btn kn-primary" data-acc="${a.account}" data-job="${job}"
+                ${(!a.ready || s.running || !s.manual) ? "disabled" : ""}>${btn}</button>
+        </div>`;
+    }).join("");
+    return `<div class="jobs-grid">${jobs || `<div class="empty">Задач нет</div>`}</div>`;
+}
+
+/* ---------------- Прокси ---------------- */
+
+const MODE_TITLES = { auto: "Авто", on: "Только прокси", off: "Напрямую" };
+const MODE_HINTS = {
+    auto: "Идёт через прокси; если прокси не работает — сам переходит на IP Render и возвращается, когда прокси стабильно здоров 10 минут.",
+    on: "Только через прокси. Если прокси упадёт — аккаунт останется без связи (аварийного перехода нет).",
+    off: "Прокси выключен: аккаунт работает с IP Render, что бы ни случилось с прокси.",
+};
+
+function routePanel(a) {
+    const n = a.account;
+    const p = a.proxy || {};
+    const mode = p.mode || "auto";
+    const has = !!p.configured;
+    const routeNow = p.route === "proxy" ? "Через прокси" : p.route === "direct" ? "Напрямую (IP Render)" : "—";
+    const src = p.url_source === "admin" ? "задан в админке"
+        : p.url_source === "env" ? "из переменной ACCOUNT_N_PROXY" : "—";
+    const ping = [
+        p.latency_ms != null ? `до Telegram ${p.latency_ms} мс` : "",
+        p.client_ping_ms != null ? `аккаунт ${p.client_ping_ms} мс` : "",
+    ].filter(Boolean).join(" · ") || "—";
+    const exitIp = p.route === "direct" ? (p.direct_ip || "—") : (p.exit_ip || "—");
+
+    const seg = ["auto", "on", "off"].map(m =>
+        `<button class="seg-btn ${m === mode ? "active" : ""}" data-pmode="${m}" data-acc="${n}"
+            ${(a.dead || (m !== "off" && !has)) ? "disabled" : ""}>${MODE_TITLES[m]}</button>`).join("");
+
+    const fo = p.failed_over
+        ? `<div class="banner warn">${ico("alert", "")}<div>Авария прокси: аккаунт временно на IP Render. Вернётся на прокси сам,
+           когда тот проработает стабильно ${Math.round((p.failback_sec || 600) / 60)} мин.</div></div>` : "";
+    const err = p.error ? `<div class="banner warn">${ico("alert", "")}<div>${escapeHtml(p.error)}</div></div>` : "";
+    const ev = (p.events || []).slice().reverse().slice(0, 3)
+        .map(e => `<div class="ev">${escapeHtml(formatDate(e.at))} — ${escapeHtml(e.text)}</div>`).join("");
+
+    return `<div class="two-col">
+        <div>
+            <h4 class="pn-h">Состояние</h4>
+            ${lr("Сейчас", escapeHtml(routeNow))}
+            ${lr("Прокси", has ? escapeHtml(p.display || "—") + (p.auth ? " " + ico("key") : "") : "не задан")}
+            ${lr("Статус", proxyBadge(p))}
+            ${lr("IP выхода", escapeHtml(exitIp))}
+            ${lr("Пинг", escapeHtml(ping))}
+            ${lr("Проверен", p.checked_at ? escapeHtml(formatDate(p.checked_at)) : "—")}
+            ${lr("Источник", escapeHtml(src))}
+            ${fo}${err}
+            ${ev ? `<div class="evs">${ev}</div>` : ""}
+            <div class="btn-row"><button class="kn-btn" data-pcheck="${n}">Проверить сейчас</button></div>
+        </div>
+        <div>
+            <h4 class="pn-h">Режим маршрута</h4>
+            <div class="seg">${seg}</div>
+            <p class="hint">${escapeHtml(MODE_HINTS[mode])}</p>
+            <h4 class="pn-h">${has ? "Заменить прокси" : "Добавить прокси"}</h4>
+            <input class="kn-search full" type="text" id="purl-${n}" placeholder="socks5://user:pass@host:port" autocomplete="off">
+            <div class="btn-row">
+                <button class="kn-btn kn-primary" data-purl="${n}" ${a.dead ? "disabled" : ""}>Сохранить прокси</button>
+                ${p.url_source === "admin" ? `<button class="kn-btn" data-purl-clear="${n}">Убрать адрес</button>` : ""}
+                ${has && mode !== "off" ? `<button class="kn-btn" data-pmode="off" data-acc="${n}">Отключить прокси</button>` : ""}
+            </div>
+            ${p.url_source === "env" ? `<p class="hint">Адрес задан переменной окружения. Чтобы убрать его совсем, удалите ACCOUNT_${n}_PROXY на Render или выберите «Напрямую».</p>` : ""}
+        </div>
     </div>`;
 }
 
+/* ---------------- Защита ---------------- */
+
+function protectionPanel(a) {
+    const p = a.protection;
+    if (!p) return `<div class="empty">Нет данных о защите аккаунта</div>`;
+    const glyph = { ACTIVE: "●", COOLDOWN: "■", RECOVERING: "◐", OFFLINE: "○", AUTH_ERROR: "✕" }[p.state] || "•";
+    const fl = p.last_flood
+        ? `${p.last_flood.sec} с на «${escapeHtml(String(p.last_flood.action))}»` : "не было";
+    const budgets = Object.values(p.budgets || {}).map(b => {
+        const pct = b.cap ? Math.min(100, Math.round(b.used / b.cap * 100)) : 0;
+        return `<div class="bud"><div class="bud-top"><span>${escapeHtml(b.title)}</span>
+            <b>${b.used} / ${b.cap === null ? "∞" : b.cap}</b></div>
+            <div class="pbar"><i style="width:${pct}%"></i></div></div>`;
+    }).join("");
+    const alerts = [];
+    if (p.cooldown_left > 0) alerts.push(`КД ещё ${fmtSec(p.cooldown_left)}`);
+    if (p.recovering_left > 0) alerts.push(`восстановление ещё ${fmtSec(p.recovering_left)}`);
+    if (p.penalty_left > 0) alerts.push(`штрафной режим ещё ${fmtSec(p.penalty_left)}`);
+    const peer = p.peer_flood
+        ? `<div class="banner bad">${ico("alert", "")}<div>Был PeerFlood — проверьте аккаунт в @SpamBot.</div></div>` : "";
+
+    return `<div class="two-col">
+        <div>
+            <h4 class="pn-h">Состояние</h4>
+            <div class="big-state">${glyph} ${escapeHtml(p.state_title)}</div>
+            ${alerts.length ? `<p class="hint">${alerts.join(" · ")}</p>` : ""}
+            ${peer}
+            ${lr("FloodWait за час", String(p.floods_1h))}
+            ${lr("FloodWait за сутки", String(p.floods_24h))}
+            ${lr("Последний", fl)}
+            ${lr("Нагрузка", Math.round(p.load_factor * 100) + "%")}
+            ${lr("Замедление", "×" + p.slowdown)}
+            ${lr("Паузы", "×" + p.pace)}
+            <div class="btn-row"><button class="kn-btn" data-pclear="${a.account}"
+                ${(p.cooldown_left || p.recovering_left || p.penalty_left) ? "" : "disabled"}>Сбросить КД / штраф</button></div>
+        </div>
+        <div>
+            <h4 class="pn-h">Бюджеты на сегодня</h4>
+            ${budgets || `<div class="empty">Нет данных</div>`}
+        </div>
+    </div>`;
+}
+
+/* ---------------- Прогрев ---------------- */
+
 function warmupPanel(a) {
+    const n = a.account;
     const w = a.warmup || {};
     const ultra = w.mode === "ultra";
     let head;
     if (w.enabled && w.active) {
         const till = w.ends_at ? ` · до ${escapeHtml(formatDate(w.ends_at))}` : "";
+        const pct = w.days ? Math.min(100, Math.round(((w.day - 1) / w.days) * 100)) : 0;
+        let extra = `нагрузка ${Math.round(w.factor * 100)}%`;
         if (ultra) {
             const phase = w.phase === "lurk"
-                ? `затишье (ещё ${fmtSec(w.lurk_left_sec)}): аккаунт только читает канал`
-                : "рост по кривой";
+                ? `затишье (ещё ${fmtSec(w.lurk_left_sec)}): только чтение канала` : "рост по кривой";
             const quiet = w.quiet ? ` · тихие часы ${escapeHtml(w.quiet)} (UTC${w.tz_offset >= 0 ? "+" : ""}${w.tz_offset})` : "";
-            head = `<div class="wd-warm">${ico("shield", "")}УЛЬТРА-прогрев: день ${w.day} из ${w.days} · ${phase} · нагрузка ${Math.round(w.factor * 100)}% · замедление ×${w.slowdown}${quiet}${till}</div>`;
-        } else {
-            head = `<div class="wd-warm">${ico("leaf", "")}Прогрев: день ${w.day} из ${w.days} · нагрузка ${Math.round(w.factor * 100)}% от обычной${till}</div>`;
+            extra = `${phase} · нагрузка ${Math.round(w.factor * 100)}% · замедление ×${w.slowdown}${quiet}`;
         }
+        head = `<div class="warm-state on">
+            <div class="warm-top">${ico(ultra ? "shield" : "leaf", "")}<b>${ultra ? "Ультра-прогрев" : "Прогрев"}: день ${w.day} из ${w.days}</b><span>${till}</span></div>
+            <div class="pbar big"><i style="width:${pct}%"></i></div>
+            <div class="warm-sub">${extra}</div></div>`;
     } else if (w.enabled) {
-        head = `<div class="wd-warm done">${ico("check", "")}Прогрев завершён (${w.days} дн.) — работает на полной нагрузке</div>`;
+        head = `<div class="warm-state done">${ico("check", "")}<b>Прогрев завершён (${w.days} дн.)</b><span>работает на полной нагрузке</span></div>`;
     } else {
-        head = `<div class="ctl-line">Прогрев выключен — аккаунт работает на полной нагрузке.</div>`;
+        head = `<div class="warm-state">${ico("leaf", "")}<b>Прогрев выключен</b><span>аккаунт работает на полной нагрузке</span></div>`;
     }
-    const curMode = w.enabled && w.mode ? w.mode : "normal";
-    const curDays = w.enabled && w.days ? w.days : 5;
-    return `<div class="ctl-job">
-        <div class="ctl-job-head"><b>${ico("leaf", "")}Прогрев</b></div>${head}
-        <div class="ctl-line"><b>Обычный</b>: нагрузка растёт с 20% до 100% линейно (до 60 дн.).<br>
-            <b>Ультра</b> (хрупкие аккаунты, напр. Тайвань; до 90 дн.): первые дни только чтение канала, затем рост с 5% по кривой,
-            тихие часы, строгий прокси (без перехода на IP Render), малые дневные бюджеты вступлений/запусков. Цель — сохранить аккаунт.
-            Промокоды и чеки ловятся (в ультра — с дневным лимитом). Применяется сразу.</div>
-        <div class="wd-mode">
-            <select id="wmode-${a.account}" class="wd-fid">
-                <option value="normal" ${curMode === "normal" ? "selected" : ""}>Обычный</option>
-                <option value="ultra" ${curMode === "ultra" ? "selected" : ""}>Ультра</option>
-            </select>
-            <input class="wd-fid" type="number" min="1" max="90" value="${curDays}" id="wdays-${a.account}">
-            <button class="kn-btn kn-primary" data-wstart="${a.account}">${w.enabled && w.active ? "Начать заново" : "Запустить прогрев"}</button>
-            ${w.enabled ? `<button class="kn-btn" data-wstop="${a.account}">Выключить</button>` : ""}
-        </div></div>`;
+    const cur = w.enabled && w.mode ? w.mode : "normal";
+    const days = w.enabled && w.days ? w.days : 5;
+    return `${head}
+        <h4 class="pn-h">Режим прогрева</h4>
+        <div class="mode-cards">
+            <div class="mode-card ${cur === "normal" ? "active" : ""}" data-wm="normal" data-n="${n}">
+                <b>Обычный</b><span>Нагрузка плавно растёт с 20% до 100%. До 60 дней.</span></div>
+            <div class="mode-card ${cur === "ultra" ? "active" : ""}" data-wm="ultra" data-n="${n}">
+                <b>Ультра</b><span>Для хрупких аккаунтов: сначала только чтение канала, затем рост с 5%, тихие часы, строгий прокси. До 90 дней.</span></div>
+        </div>
+        <input type="hidden" id="wmode-${n}" value="${cur}">
+        <div class="btn-row">
+            <label class="inline-f">Дней <input class="kn-search" type="number" min="1" max="${cur === "ultra" ? 90 : 60}" value="${days}" id="wdays-${n}"></label>
+            <button class="kn-btn kn-primary" data-wstart="${n}" ${a.dead ? "disabled" : ""}>${w.enabled && w.active ? "Начать заново" : "Запустить прогрев"}</button>
+            ${w.enabled ? `<button class="kn-btn" data-wstop="${n}">Выключить</button>` : ""}
+        </div>
+        <p class="hint">Промокоды и чеки ловятся и во время прогрева (в ультра — с дневным лимитом). Применяется сразу.</p>`;
+}
+
+/* ---------------- Вывод ---------------- */
+
+function withdrawPanel(a) {
+    const i = accInfo[a.account] || {};
+    return `<div class="two-col">
+        <div>
+            <h4 class="pn-h">Звёзды</h4>
+            ${lr("Баланс", i.balance != null && a.ready ? formatStars(i.balance) + " ★" : "—")}
+            ${lr("Друзей", i.friends != null ? String(i.friends) : "—")}
+            ${lr("Активировали бота", i.activated != null ? String(i.activated) : "—")}
+            ${lr("Выведено всего", i.withdrawn_stars != null ? formatStars(i.withdrawn_stars) + " ★" : "—")}
+            ${lr("Количество выводов", i.withdrawn_count != null ? String(i.withdrawn_count) : "—")}
+        </div>
+        <div>
+            <h4 class="pn-h">Действия</h4>
+            <p class="hint">Вывод подарком — на вкладке «Выводы». Проба безопасна: она нажимает минимальную сумму, только если бот гарантированно откажет.</p>
+            <div class="btn-row">
+                <button class="kn-btn kn-primary" data-goto-wd>Открыть «Выводы»</button>
+                <button class="kn-btn" data-probe="${a.account}" ${a.ready ? "" : "disabled"}>Проба вывода</button>
+            </div>
+        </div>
+    </div>`;
 }
 
 async function ctlAction(fn, okText) {
@@ -1716,7 +2138,7 @@ async function ctlAction(fn, okText) {
     } catch (e) {
         $("ctl-status").textContent = "Не вышло: " + e.message;
     }
-    loadControl();
+    loadControl(true);
 }
 
 function bindControlPanels() {
@@ -1787,7 +2209,7 @@ async function runJob(btn) {
             throw new Error(m);
         }
         $("ctl-status").textContent = "Запущено. Результат придёт в лог-группу Telegram.";
-        setTimeout(loadControl, 2500);
+        setTimeout(() => loadControl(true), 2500);
     } catch (e) {
         $("ctl-status").textContent = "Не удалось запустить: " + e.message;
         btn.disabled = false;
@@ -2176,4 +2598,3 @@ document.addEventListener("DOMContentLoaded", () => {
         sgReset(); $("sg-status").textContent = "";
     });
 });
-
