@@ -69,8 +69,11 @@ FATAL_AUTH_ERRORS = tuple(
 
 
 class PatrickAccount:
-    def __init__(self, label: str, session_string: str, index: int = 0):
+    def __init__(self, label: str, session_string: str, index: int = 0,
+                 api_id: int | None = None, api_hash: str | None = None, device: dict | None = None,
+                 lang: str | None = None, center_id: int | None = None):
         self.label = label
+        self.center_id = center_id   # id в «Центре аккаунтов» (None — аккаунт из переменных окружения)
         self.index = index
         self.ready = False  # True, когда клиент поднят и ловля промо/чеков запущена
         self.dead = None    # причина, если сессия мертва (бан/отзыв/двойной запуск) — аккаунт остановлен
@@ -86,6 +89,13 @@ class PatrickAccount:
         # (ACCOUNT_<N>_DEVICE_MODEL / SYSTEM_VERSION / APP_VERSION / LANG_CODE). Значения должны быть
         # СТАБИЛЬНЫМИ: менять их у живой сессии нельзя — смена устройства сама по себе подозрительна.
         device_kw = {}
+        # Аккаунты из центра приходят со своим устройством (оно сохранено при входе) — это базовые значения,
+        # переменные ACCOUNT_<N>_* ниже их переопределяют.
+        for k in ("device_model", "system_version", "app_version"):
+            if (device or {}).get(k):
+                device_kw[k] = device[k]
+        if lang:
+            device_kw["lang_code"] = device_kw["system_lang_code"] = lang
         for env_key, kw in (("DEVICE_MODEL", "device_model"), ("SYSTEM_VERSION", "system_version"),
                             ("APP_VERSION", "app_version"), ("LANG_CODE", "lang_code"),
                             ("SYSTEM_LANG_CODE", "system_lang_code")):
@@ -94,8 +104,8 @@ class PatrickAccount:
                 device_kw[kw] = val
         self.client = TelegramClient(
             StringSession(session_string),
-            API_ID,
-            API_HASH,
+            api_id or API_ID,
+            api_hash or API_HASH,
             **device_kw,
         )
 
