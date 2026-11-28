@@ -1300,7 +1300,7 @@ function renderHeatmapChart(anim) {
 
 function setupNavigation() {
     const buttons =
-        document.querySelectorAll(".nav-item");
+        document.querySelectorAll(".nav-item:not(.nav-link)");
 
     const sections = {
         dashboard: {
@@ -2176,3 +2176,4 @@ document.addEventListener("DOMContentLoaded", () => {
         sgReset(); $("sg-status").textContent = "";
     });
 });
+
