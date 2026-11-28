@@ -75,7 +75,6 @@
 </div>
 
 <div class="bg-grid" aria-hidden="true"></div>
-<div class="bg-glow" aria-hidden="true"></div>
 
 <div class="app">
 
@@ -346,33 +345,20 @@
             <!-- ========================================= -->
 
             <section id="section-accounts" class="section">
-                <div class="panel">
+                <div class="panel acc-panel">
                     <div class="panel-header">
                         <div>
                             <h2>Telegram аккаунты</h2>
-                            <span>Текущий статус подключений и прокси</span>
+                            <span>Все аккаунты воронки: статус, ник, FloodWait, выведено. «Управлять» открывает полную карточку.</span>
                         </div>
-                        <button class="kn-btn kn-primary" id="proxy-check-all">Проверить все прокси</button>
+                        <div class="head-actions">
+                            <button class="kn-btn hidden" id="acc-toggle-hidden">Скрытые</button>
+                            <a class="kn-btn" href="/accounts">Центр аккаунтов</a>
+                            <button class="kn-btn kn-primary" id="proxy-check-all">Проверить все прокси</button>
+                        </div>
                     </div>
-
                     <div id="proxy-status" class="kn-status"></div>
-
-                    <div class="table-wrapper">
-                        <table>
-                            <thead>
-                                <tr>
-                                    <th>Аккаунт</th>
-                                    <th>Имя</th>
-                                    <th>Статус</th>
-                                    <th>Прокси</th>
-                                    <th>Статус прокси</th>
-                                    <th>Последнее подключение</th>
-                                    <th>Обновлён</th>
-                                </tr>
-                            </thead>
-                            <tbody id="accounts-table"></tbody>
-                        </table>
-                    </div>
+                    <div id="accounts-grid" class="acc-grid"></div>
                 </div>
             </section>
 
@@ -464,19 +450,9 @@
             <!-- ========================================= -->
 
             <section id="section-control" class="section">
-                <div class="panel">
-                    <div class="panel-header">
-                        <div>
-                            <h2>Управление</h2>
-                            <span>
-                                Расписание задач каждого аккаунта и ручной запуск. После перезапуска сервиса
-                                задачи идут по этому расписанию (оно хранится в БД), а не все сразу.
-                            </span>
-                        </div>
-                    </div>
-                    <div id="ctl-status" class="kn-status"></div>
-                    <div id="ctl-list" class="ctl-list"></div>
-                </div>
+                <div id="ctl-status" class="kn-status"></div>
+                <div id="acc-switch" class="acc-switch"></div>
+                <div id="ctl-list"></div>
             </section>
 
             <section id="section-withdraw" class="section">
